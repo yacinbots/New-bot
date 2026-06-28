@@ -1,7 +1,31 @@
 <?php
 
+// ════════════════════════════════════════════════════════════════════════════
+// الخطوة الأولى: قراءة الطلب وإرسال 200 OK فوراً لتجنب 502 Bad Gateway
+// ════════════════════════════════════════════════════════════════════════════
+$rawInput = file_get_contents("php://input");
+
+// إذا كان طلب GET (التحقق من webhook) نتعامل معه بسرعة
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    // سيُعالَج لاحقاً في قسم Webhook Verify
+}
+
+// إذا كان طلب POST نرد فوراً بـ 200 لمنع timeout
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    http_response_code(200);
+    header('Content-Type: text/plain');
+    echo 'EVENT_RECEIVED';
+    if (function_exists('fastcgi_finish_request')) {
+        fastcgi_finish_request();
+    } else {
+        // flush للخوادم التي لا تدعم fastcgi_finish_request
+        if (ob_get_level() > 0) ob_end_flush();
+        flush();
+    }
+}
+
 if (!isset($input)) {
-    $input = json_decode(file_get_contents("php://input"), true);
+    $input = json_decode($rawInput, true);
 }
 if (!isset($event)) {
     $event = $input['entry'][0]['messaging'][0] ?? [];
@@ -207,27 +231,27 @@ function getPending(string $psid): ?string
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Webhook Verify
+// Webhook Verify — GET Request
 // ════════════════════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     if (isset($_GET['hub_mode'], $_GET['hub_verify_token'], $_GET['hub_challenge'])
         && $_GET['hub_mode'] === 'subscribe'
         && $_GET['hub_verify_token'] === VERIFY_TOKEN) {
-        http_response_code(200); echo $_GET['hub_challenge'];
-    } else { http_response_code(403); echo 'Forbidden'; }
+        http_response_code(200);
+        echo $_GET['hub_challenge'];
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+    }
     exit;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// POST Handler
+// POST Handler — الرد 200 أُرسل مسبقاً في بداية السكريبت
 // ════════════════════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $input = file_get_contents('php://input');
-    $data  = json_decode($input, true);
-    http_response_code(200);
-    header('Content-Type: text/plain');
-    echo 'EVENT_RECEIVED';
-    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+    $data = json_decode($rawInput, true);
+    // 200 OK أُرسل مسبقاً في بداية الملف
     if (!$data || ($data['object'] ?? '') !== 'page') exit;
     foreach ($data['entry'] as $entry) {
         foreach ($entry['messaging'] ?? [] as $event) {
