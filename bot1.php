@@ -1,31 +1,7 @@
 <?php
 
-// ════════════════════════════════════════════════════════════════════════════
-// الخطوة الأولى: قراءة الطلب وإرسال 200 OK فوراً لتجنب 502 Bad Gateway
-// ════════════════════════════════════════════════════════════════════════════
-$rawInput = file_get_contents("php://input");
-
-// إذا كان طلب GET (التحقق من webhook) نتعامل معه بسرعة
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    // سيُعالَج لاحقاً في قسم Webhook Verify
-}
-
-// إذا كان طلب POST نرد فوراً بـ 200 لمنع timeout
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    http_response_code(200);
-    header('Content-Type: text/plain');
-    echo 'EVENT_RECEIVED';
-    if (function_exists('fastcgi_finish_request')) {
-        fastcgi_finish_request();
-    } else {
-        // flush للخوادم التي لا تدعم fastcgi_finish_request
-        if (ob_get_level() > 0) ob_end_flush();
-        flush();
-    }
-}
-
 if (!isset($input)) {
-    $input = json_decode($rawInput, true);
+    $input = json_decode(file_get_contents("php://input"), true);
 }
 if (!isset($event)) {
     $event = $input['entry'][0]['messaging'][0] ?? [];
@@ -231,27 +207,27 @@ function getPending(string $psid): ?string
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Webhook Verify — GET Request
+// Webhook Verify
 // ════════════════════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
     if (isset($_GET['hub_mode'], $_GET['hub_verify_token'], $_GET['hub_challenge'])
         && $_GET['hub_mode'] === 'subscribe'
         && $_GET['hub_verify_token'] === VERIFY_TOKEN) {
-        http_response_code(200);
-        echo $_GET['hub_challenge'];
-    } else {
-        http_response_code(403);
-        echo 'Forbidden';
-    }
+        http_response_code(200); echo $_GET['hub_challenge'];
+    } else { http_response_code(403); echo 'Forbidden'; }
     exit;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// POST Handler — الرد 200 أُرسل مسبقاً في بداية السكريبت
+// POST Handler
 // ════════════════════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $data = json_decode($rawInput, true);
-    // 200 OK أُرسل مسبقاً في بداية الملف
+    $input = file_get_contents('php://input');
+    $data  = json_decode($input, true);
+    http_response_code(200);
+    header('Content-Type: text/plain');
+    echo 'EVENT_RECEIVED';
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
     if (!$data || ($data['object'] ?? '') !== 'page') exit;
     foreach ($data['entry'] as $entry) {
         foreach ($entry['messaging'] ?? [] as $event) {
@@ -599,7 +575,7 @@ function sendAlgeriaMatchGiftPromo(string $psid): void
         'messaging_type' => 'RESPONSE',
         'message'        => [
             'text' =>
-                "🇩🇿🔥 هدية خاصة بمباراة الجزائر!\n\n" .
+                "🇩🇿🔥 هدية خاصة في اليوم الذي تلعب فيه الجزائر مباراة ⚽!\n\n" .
                 "━━━━━━━━━━━━━━━━━━━━━━\n\n" .
                 "🎁 احصل على 12Go مجاناً 🎉\n" .
                 "⏳ صالحة لمدة 5 ساعات فقط\n" .
@@ -627,8 +603,8 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
     $remaining = getMatchGiftTimeRemaining();
     if ($remaining === null) {
         sendMessage($psid,
-            "⏰ انتهى وقت الهدية!\n\n" .
-            "كانت الهدية متاحة من 1:00 صباحاً حتى 5:00 صباحاً فقط.\n\n" .
+             "⏰ انتهى وقت الهدية!\n\n" .
+            "الهدية متاحة فقط في اليوم الذي تعلب فيه الجزائر مباراة ⚽ من 1:00 صباحاً حتى 5:00 صباحاً فقط.\n\n" .
             "⚡ قناة التلغرام: https://t.me/tasjilbott"
         );
         return;
@@ -713,7 +689,7 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
                 "🎁 الهدية: 12Go صالحة لمدة 5 ساعات\n\n" .
                 "⚡ قناة التلغرام: https://t.me/tasjilbott"
             );
-            sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+            sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
             clearSession($psid);
             return;
         }
@@ -722,7 +698,7 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
         if ($httpCode === 400) {
             recordFinalResult($psid);
             sendMessage($psid,
-                "⚠️ لقد استفدت من الهدية مسبقاً أو أن رقمك غير مؤهل لهذه الهدية.\n\n" .
+                 "اما اليوم ليس يوم مباراة الجزائر ⚠️ او انك استفدت من الهدية مسبقاً أو أن رقمك غير مؤهل لهذه الهدية.\n\n" .
                 "⚡ قناة التلغرام: https://t.me/tasjilbott"
             );
             clearSession($psid);
@@ -794,7 +770,7 @@ function activateOffer(string $psid, array $user, string $packageCode): void
                     );
                     sendMessage($psid, "");
                     clearSession($psid);
-                    sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+                    sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
                     return;
                 }
             }
@@ -873,7 +849,7 @@ function activateOfferNew(string $psid, array $user, string $packageCode): void
             );
             sendMessage($psid, "");
             clearSession($psid);
-            sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+            sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
             return;
         }
 
@@ -975,7 +951,7 @@ function activate2G(string $psid, array $user): void
                 sendMessage($psid, "⭐ تم تفعيل 2G بنجاح 🎁 للرقم {$displayMasked}\n\n⚡ قناة التلقرام : https://t.me/tasjilbott");
                 sendMessage($psid, "");
                 clearSession($psid);
-                sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+                sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
                 return;
             }
             usleep(1000000); continue;
@@ -1006,14 +982,14 @@ function handleInviteStart(string $psid, array $user): void
         recordFinalResult($psid);
         sendMessage($psid, "🎁 تم تفعيل مكافأة معلقة وحصلت على 1 جيقا 🎉\n\n⏳ عد بعد 24 ساعة للحصول على مكافأة جديدة 📆\n\n⚡ قناة التلقرام : https://t.me/tasjilbott");
         clearSession($psid);
-        sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+        sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
         return;
     }
     if ($bonusResult === 'SUCCESS_500MO') {
         recordFinalResult($psid);
         sendMessage($psid, "🎁 تم تفعيل مكافأة معلقة وحصلت على 500Mo 🎉\n\n⏳ عد بعد 24 ساعة للحصول على مكافأة جديدة 📆\n\n⚡ قناة التلقرام : https://t.me/tasjilbott");
         clearSession($psid);
-        sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+        sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
         return;
     }
     if ($bonusResult === 'ALREADY_CLAIMED') {
@@ -1182,7 +1158,7 @@ function handleInviteeOtp(string $psid, string $text, array $session): void
         "📊 نتيجة تفعيل المكافآت:\n\n👤 أنت (الداعي):\n{$senderMsg}\n\n👤 المدعو:\n{$inviteeMsg}\n\n⚡ قناة التلقرام : https://t.me/tasjilbott"
     );
     clearSession($psid);
-    sendMessage($psid, "لاتنسى متابعة حساب المطور </> : https://www.facebook.com/profile.php?id=100052854003446");
+    sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1591,46 +1567,9 @@ function djezzyCurl(string $url, string $data, string $ph, string $pa, string $t
 function loadProxies(): array
 {
     if (file_exists(PROXY_LIST_FILE)) { $d=json_decode(file_get_contents(PROXY_LIST_FILE),true); if(is_array($d)&&$d) return $d; }
+    
     return [
     "https://change4.owlproxy.com:7778:gip2m6CrMf80_custom_zone_DZ_st__city_sid_00576820_time_5:4986481",
-    "https://change4.owlproxy.com:7778:W875sxqC3170_custom_zone_DZ_st__city_sid_31881450_time_5:4986501",
-    "https://change4.owlproxy.com:7778:cvDBsWfHoZ50_custom_zone_DZ_st__city_sid_86435615_time_5:4986521",
-    "https://change4.owlproxy.com:7778:DJXLLlVHro50_custom_zone_DZ_st__city_sid_64770433_time_5:4986531",
-    "https://change4.owlproxy.com:7778:tLeQJdLqHd50_custom_zone_DZ_st__city_sid_68342837_time_5:4986554",
-    "https://change4.owlproxy.com:7778:hqrujtOuDOA0_custom_zone_DZ_st__city_sid_27438037_time_5:4986566",
-    "https://change4.owlproxy.com:7778:FV5HIpXnVl10_custom_zone_DZ_st__city_sid_38690058_time_5:4986592",
-    "https://change4.owlproxy.com:7778:FJtGGAdEzO40_custom_zone_DZ_st__city_sid_79105828_time_5:4986616",
-    "https://change4.owlproxy.com:7778:clcP9uW2x520_custom_zone_DZ_st__city_sid_14445049_time_5:4986639",
-    "https://change4.owlproxy.com:7778:ygqi3nigqr50_custom_zone_DZ_st__city_sid_88109066_time_5:4986667",
-    "https://change4.owlproxy.com:7778:2eR0qwBw0xA0_custom_zone_DZ_st__city_sid_44559704_time_5:4986683",
-    "https://change4.owlproxy.com:7778:PMHs71GfGe90_custom_zone_DZ_st__city_sid_25891446_time_5:4986712",
-    "https://change4.owlproxy.com:7778:dO2VIDr8nL90_custom_zone_DZ_st__city_sid_40720078_time_5:4986725",
-    "https://change4.owlproxy.com:7778:QZFWrBwTdn80_custom_zone_DZ_st__city_sid_90140351_time_5:4986745",
-    "https://change4.owlproxy.com:7778:LNPiVrk40F80_custom_zone_DZ_st__city_sid_20157104_time_5:4986761",
-    "https://change4.owlproxy.com:7778:IKZ8Z3Y0Jy90_custom_zone_DZ_st__city_sid_11848234_time_5:4986781",
-    "https://change4.owlproxy.com:7778:CUqfsRFo2o10_custom_zone_DZ_st__city_sid_79838167_time_5:4986796",
-    "https://change4.owlproxy.com:7778:wCjiTL2WXUA0_custom_zone_DZ_st__city_sid_70400514_time_5:4986811",
-    "https://change4.owlproxy.com:7778:Qxtw9Y0lSG30_custom_zone_DZ_st__city_sid_86368933_time_5:4986825",
-    "https://change4.owlproxy.com:7778:dcWbFAOHwi70_custom_zone_DZ_st__city_sid_08920820_time_5:4986842",
-    "https://change4.owlproxy.com:7778:uAX5uXQqs890_custom_zone_DZ_st__city_sid_55907938_time_5:4986851",
-    "https://change4.owlproxy.com:7778:EzsX1DE6HR70_custom_zone_DZ_st__city_sid_25346730_time_5:4986862",
-    "https://change4.owlproxy.com:7778:U3zd3sszGa50_custom_zone_DZ_st__city_sid_07643370_time_5:4986877",
-    "https://change4.owlproxy.com:7778:CRAGlH9uqC50_custom_zone_DZ_st__city_sid_26477824_time_5:4986891",
-    "https://change4.owlproxy.com:7778:T758IDr8p180_custom_zone_DZ_st__city_sid_54783317_time_5:4986902",
-    "https://change4.owlproxy.com:7778:zvOrnK2rYj30_custom_zone_DZ_st__city_sid_00017921_time_5:4986918",
-    "https://change4.owlproxy.com:7778:5Ou8LZuGXO60_custom_zone_DZ_st__city_sid_34565498_time_5:4986933",
-    "https://change4.owlproxy.com:7778:foUDtXWxFN70_custom_zone_DZ_st__city_sid_99841159_time_5:4986944",
-    "https://change4.owlproxy.com:7778:5o4XJszRkx90_custom_zone_DZ_st__city_sid_36303130_time_5:4986968",
-    "https://change4.owlproxy.com:7778:itpNXR2tZd70_custom_zone_DZ_st__city_sid_93395952_time_5:4986980",
-    "https://change4.owlproxy.com:7778:1KAIKjCTua60_custom_zone_DZ_st__city_sid_21326655_time_5:4986992",
-    "https://change4.owlproxy.com:7778:KQ5T6dHDkQ70_custom_zone_DZ_st__city_sid_54247478_time_5:4987010",
-    "https://change4.owlproxy.com:7778:2zDtAx1xEc10_custom_zone_DZ_st__city_sid_27509092_time_5:4987025",
-    "https://change4.owlproxy.com:7778:iUI5giWoFh90_custom_zone_DZ_st__city_sid_96051000_time_5:4987041",
-    "https://change4.owlproxy.com:7778:2VEmIjMPFD90_custom_zone_DZ_st__city_sid_52838476_time_5:4987062",
-    "https://change4.owlproxy.com:7778:jK7dBuBZwn90_custom_zone_DZ_st__city_sid_68587397_time_5:4987081",
-    "https://change4.owlproxy.com:7778:mxsta2yxBs30_custom_zone_DZ_st__city_sid_02121477_time_5:4987098",
-    "https://change4.owlproxy.com:7778:1lLNE5uC5880_custom_zone_DZ_st__city_sid_59447515_time_5:4987114",
-    "https://change4.owlproxy.com:7778:ow54kQSQiQ00_custom_zone_DZ_st__city_sid_47195322_time_5:4987129",
     "https://change4.owlproxy.com:7778:nDBCZznJ9G90_custom_zone_DZ_st__city_sid_35191153_time_5:4987148"
 ];
 }
