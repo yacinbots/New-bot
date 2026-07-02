@@ -1,6 +1,6 @@
 <?php
 // ════════════════════════════════════════════════════════════════════════════
-// TASJIL BOT — Facebook Messenger + Telegram Admin Bot
+// TASJIL BOT — نسخة محسّنة مع قائمة انتظار وإدارة ضغط عالي
 // ════════════════════════════════════════════════════════════════════════════
 
 if (!isset($input)) {
@@ -12,16 +12,16 @@ if (!isset($event)) {
 $sender_id = $event['sender']['id'] ?? null;
 $message   = $event['message']['text'] ?? '';
 
-// ════════ Facebook Config ════════
+// ════════ Facebook Config ════════════════════════════════════════════════════
 define('FB_TOKEN',        'EAAFYLlWaXQkBRmeSVCCkTskO6L3TDqBURP0I1DGsPlZADbPdKqhpJjMtsoP4Cr1bjeMPDHzlOSs0M4dcgW9uZBu6ma96nWqQ3K1qLstmXIXZBeRZBqMFsd7ecjihBU6fODYSZBxdbcy5q32Suz0gWmO05a9qao8E1VB3XRRHUa6db5khqyuuHfVhLYbdiXYpHjG0v53jGkwZDZD');
 define('VERIFY_TOKEN',    'Yacin');
 
-// ════════ Telegram Config ════════
+// ════════ Telegram Config ════════════════════════════════════════════════════
 define('TG_TOKEN',   '8723811941:AAGIqJqMbDULekSBXPnFcK9Kho11fDSfK4A');
 define('TG_ADMIN_ID', '8499896271');
 define('TG_API',     'https://api.telegram.org/bot' . TG_TOKEN);
 
-// ════════ Paths ════════
+// ════════ Paths ══════════════════════════════════════════════════════════════
 define('PROXY_LIST_FILE',  '/tmp/proxies.json');
 define('PROXY_API_URL',    'https://dev-bendjarayacine.pantheonsite.io/wp-admin/maint/proxy.json');
 define('SESSIONS_DIR',     '/tmp/fb_sessions');
@@ -34,20 +34,28 @@ define('RATE_LIMIT_DIR',   '/tmp/fb_rate_limit');
 define('TG_STATE_DIR',     '/tmp/tg_states');
 define('MATCH_GIFT_FILE',  '/tmp/match_gift_config.json');
 define('BROADCAST_LOG',    '/tmp/broadcast_log.json');
+define('QUEUE_DIR',        '/tmp/fb_queue');
+define('PROCESSED_QUEUE',  '/tmp/fb_queue_processed');
+define('SUCCESS_LOG_FILE', '/tmp/match_gift_success.json');
 
 define('RATE_LIMIT_SECONDS', 600);
+define('MAX_QUEUE_ITEMS', 200);
+define('PROCESS_DELAY_US', 500000);
 
-// ════════ Client Credentials ════════
+// ════════ Client Credentials ════════════════════════════════════════════════
 define('CLIENT_ID_OLD',     '87pIExRhxBb3_wGsA5eSEfyATloa');
 define('CLIENT_SECRET_OLD', 'uf82p68Bgisp8Yg1Uz8Pf6_v1XYa');
 define('CLIENT_ID_NEW',     '6E6CwTkp8H1CyQxraPmcEJPQ7xka');
 define('CLIENT_SECRET_NEW', 'MVpXHW_ImuMsxKIwrJpoVVMHjRsa');
 
+// إنشاء المجلدات
 @mkdir(SESSIONS_DIR,   0777, true);
 @mkdir(USERS_DIR,      0777, true);
 @mkdir(PENDING_DIR,    0777, true);
 @mkdir(RATE_LIMIT_DIR, 0777, true);
 @mkdir(TG_STATE_DIR,   0777, true);
+@mkdir(QUEUE_DIR,      0777, true);
+@mkdir(PROCESSED_QUEUE, 0777, true);
 
 // ════════════════════════════════════════════════════════════════════════════
 // Match Gift Config (يتحكم بها من تلقرام)
@@ -55,11 +63,13 @@ define('CLIENT_SECRET_NEW', 'MVpXHW_ImuMsxKIwrJpoVVMHjRsa');
 function getMatchGiftConfig(): array
 {
     $defaults = [
-        'enabled'   => false,
-        'qr_code'   => 'https://www.djezzy.dz/scanwin-wd26?1',
-        'gift_label'=> '12Go',
-        'start_hour'=> 1,
-        'end_hour'  => 5,
+        'enabled'    => false,
+        'qr_code'    => 'https://www.djezzy.dz/scanwin-wd26?1',
+        'gift_label' => '12Go',
+        'start_hour' => 1,
+        'end_hour'   => 5,
+        'match_date' => null,
+        'match_timezone' => 'Africa/Algiers',
     ];
     if (!file_exists(MATCH_GIFT_FILE)) return $defaults;
     $d = json_decode(file_get_contents(MATCH_GIFT_FILE), true);
@@ -68,6 +78,96 @@ function getMatchGiftConfig(): array
 function saveMatchGiftConfig(array $cfg): void
 {
     file_put_contents(MATCH_GIFT_FILE, json_encode($cfg, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Match Gift Success Log
+// ════════════════════════════════════════════════════════════════════════════
+function logMatchGiftSuccess(string $psid, string $msisdn, string $label): void
+{
+    $log = file_exists(SUCCESS_LOG_FILE) ? json_decode(file_get_contents(SUCCESS_LOG_FILE), true) : [];
+    $log[] = [
+        'psid' => $psid,
+        'msisdn' => $msisdn,
+        'label' => $label,
+        'timestamp' => time(),
+        'date' => date('Y-m-d H:i:s')
+    ];
+    file_put_contents(SUCCESS_LOG_FILE, json_encode($log, JSON_PRETTY_PRINT));
+}
+
+function getMatchGiftSuccessCount(int $hours = 24): int
+{
+    if (!file_exists(SUCCESS_LOG_FILE)) return 0;
+    $log = json_decode(file_get_contents(SUCCESS_LOG_FILE), true);
+    if (!is_array($log)) return 0;
+    $cutoff = time() - ($hours * 3600);
+    $count = 0;
+    foreach ($log as $entry) {
+        if (($entry['timestamp'] ?? 0) >= $cutoff) {
+            $count++;
+        }
+    }
+    return $count;
+}
+
+function getMatchGiftSuccessList(int $hours = 24): array
+{
+    if (!file_exists(SUCCESS_LOG_FILE)) return [];
+    $log = json_decode(file_get_contents(SUCCESS_LOG_FILE), true);
+    if (!is_array($log)) return [];
+    $cutoff = time() - ($hours * 3600);
+    $result = [];
+    foreach ($log as $entry) {
+        if (($entry['timestamp'] ?? 0) >= $cutoff) {
+            $result[] = $entry;
+        }
+    }
+    return $result;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Match Gift Status — حساب الوقت المتبقي
+// ════════════════════════════════════════════════════════════════════════════
+function getMatchGiftStatus(): array
+{
+    $cfg = getMatchGiftConfig();
+    
+    if (!$cfg['enabled']) {
+        return ['status' => 'disabled', 'remaining' => 0, 'message' => '⏰ هدية المباراة غير متاحة حالياً.'];
+    }
+    
+    $matchDate = $cfg['match_date'] ?? null;
+    
+    if (!$matchDate) {
+        return ['status' => 'available', 'remaining' => 0, 'message' => '🎁 هدية المباراة متاحة الآن!'];
+    }
+    
+    try {
+        $timezone = new DateTimeZone($cfg['match_timezone'] ?? 'Africa/Algiers');
+        $matchTime = new DateTime($matchDate, $timezone);
+        $now = new DateTime('now', $timezone);
+        
+        $remaining = $matchTime->getTimestamp() - $now->getTimestamp();
+        
+        if ($remaining <= 0) {
+            return ['status' => 'available', 'remaining' => 0, 'message' => '🎁 هدية المباراة متاحة الآن!'];
+        }
+        
+        $hours = floor($remaining / 3600);
+        $minutes = floor(($remaining % 3600) / 60);
+        
+        if ($hours > 0) {
+            $msg = "⏳ متبقٍ على مباراة الجزائر: {$hours} ساعة و {$minutes} دقيقة";
+        } else {
+            $msg = "⏳ متبقٍ على مباراة الجزائر: {$minutes} دقيقة";
+        }
+        
+        return ['status' => 'waiting', 'remaining' => $remaining, 'message' => $msg];
+        
+    } catch (Exception $e) {
+        return ['status' => 'available', 'remaining' => 0, 'message' => '🎁 هدية المباراة متاحة!'];
+    }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -249,7 +349,7 @@ function getUserStats(): array
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Broadcast Log — لمنع الإرسال المكرر
+// Broadcast Log
 // ════════════════════════════════════════════════════════════════════════════
 function getBroadcastLog(): array
 {
@@ -296,7 +396,102 @@ function getPending(string $psid): ?string
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Proxy System — المحسّن (يستخدم جميع البروكسيات
+// Queue System
+// ════════════════════════════════════════════════════════════════════════════
+function enqueueRequest(string $psid, string $action, array $data = []): bool
+{
+    $queueFiles = glob(QUEUE_DIR . '/*.json');
+    if (count($queueFiles) >= MAX_QUEUE_ITEMS) {
+        return false;
+    }
+    
+    $entry = [
+        'psid' => $psid,
+        'action' => $action,
+        'data' => $data,
+        'timestamp' => time(),
+        'id' => uniqid('q_', true)
+    ];
+    
+    $filename = QUEUE_DIR . '/' . $entry['id'] . '.json';
+    file_put_contents($filename, json_encode($entry));
+    return true;
+}
+
+function processQueue(): void
+{
+    $queueFiles = glob(QUEUE_DIR . '/*.json');
+    
+    if (empty($queueFiles)) return;
+    
+    foreach ($queueFiles as $file) {
+        $content = file_get_contents($file);
+        if (!$content) continue;
+        
+        $entry = json_decode($content, true);
+        if (!$entry) {
+            @unlink($file);
+            continue;
+        }
+        
+        $psid = $entry['psid'];
+        $action = $entry['action'];
+        $data = $entry['data'] ?? [];
+        
+        switch ($action) {
+            case 'match_gift':
+                processMatchGiftQueue($psid, $data);
+                break;
+            case 'activate_offer':
+                processOfferQueue($psid, $data);
+                break;
+            default:
+                break;
+        }
+        
+        $processedFile = PROCESSED_QUEUE . '/' . basename($file);
+        rename($file, $processedFile);
+        
+        usleep(PROCESS_DELAY_US);
+    }
+}
+
+function processMatchGiftQueue(string $psid, array $data): void
+{
+    $user = getUser($psid);
+    if (!$user || empty($user['access_token'])) {
+        sendMessage($psid, "⚠️ يجب تسجيل الدخول أولاً، أرسل رقم هاتفك.");
+        return;
+    }
+    
+    $sess = getSession($psid);
+    if (!empty($sess['msisdn'])) {
+        $user['msisdn'] = $sess['msisdn'];
+    }
+    
+    $result = activateAlgeriaMatchGiftInternal($psid, $user);
+    sendMessage($psid, $result['message']);
+}
+
+function processOfferQueue(string $psid, array $data): void
+{
+    $user = getUser($psid);
+    if (!$user || empty($user['access_token'])) {
+        sendMessage($psid, "⚠️ يجب تسجيل الدخول أولاً، أرسل رقم هاتفك.");
+        return;
+    }
+    
+    $sess = getSession($psid);
+    if (!empty($sess['msisdn'])) {
+        $user['msisdn'] = $sess['msisdn'];
+    }
+    
+    $packageCode = $data['packageCode'] ?? '';
+    activateOffer($psid, $user, $packageCode);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Proxy System
 // ════════════════════════════════════════════════════════════════════════════
 function loadProxies(): array
 {
@@ -333,9 +528,6 @@ function parseProxy(string $proxy): array
     return ['host' => ($p[0] ?? '') . ':' . ($p[1] ?? ''), 'userpass' => ($p[2] ?? '') . ':' . ($p[3] ?? '')];
 }
 
-/**
- * getAllProxies — تجميع جميع البروكسيات المتاحة (محلية + API)
- */
 function getAllProxies(): array
 {
     $local     = loadProxies();
@@ -344,10 +536,6 @@ function getAllProxies(): array
     return array_values($combined);
 }
 
-/**
- * curlWithAllProxies — يجرب جميع البروكسيات واحدة تلو الأخرى
- * يُعيد ['http_code', 'body', 'json'] أو null إذا فشلت الكل
- */
 function curlWithAllProxies(
     string $url,
     string $method,
@@ -406,7 +594,6 @@ function curlWithAllProxies(
             FILE_APPEND
         );
 
-        // تخطي البروكسي الفاشل
         if ($errno || !$body || $httpCode === 0 || stripos($bodyStr, '<html') !== false || stripos($bodyStr, '<!DOCTYPE') !== false) {
             $failedCount++;
             continue;
@@ -416,14 +603,13 @@ function curlWithAllProxies(
         return ['http_code' => $httpCode, 'body' => $bodyStr, 'json' => $json];
     }
 
-    // كل البروكسيات فشلت
     dbg("[{$logTag}] ALL {$totalProxies} proxies failed!");
     tgNotifyAdmin("🚨 تنبيه: جميع البروكسيات ({$totalProxies}) فشلت في [{$logTag}]!\n\n🔄 يرجى إرسال قائمة بروكسيات جديدة باستخدام:\n/setproxies");
     return null;
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Telegram Notification
+// Telegram Functions
 // ════════════════════════════════════════════════════════════════════════════
 function tgNotifyAdmin(string $text): void
 {
@@ -482,7 +668,7 @@ function tgEditMessage(string $chatId, int $messageId, string $text, array $keyb
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Telegram State (للأوامر متعددة الخطوات)
+// Telegram State
 // ════════════════════════════════════════════════════════════════════════════
 function getTgState(string $chatId): array
 {
@@ -505,7 +691,6 @@ function clearTgState(string $chatId): void
 // ════════════════════════════════════════════════════════════════════════════
 function handleTelegramUpdate(array $update): void
 {
-    // Callback Query (ضغط على زر)
     if (isset($update['callback_query'])) {
         $cb     = $update['callback_query'];
         $cbId   = $cb['id'];
@@ -519,7 +704,6 @@ function handleTelegramUpdate(array $update): void
         return;
     }
 
-    // رسالة عادية
     if (!isset($update['message'])) return;
     $msg    = $update['message'];
     $chatId = (string)($msg['chat']['id'] ?? '');
@@ -532,23 +716,23 @@ function handleTelegramUpdate(array $update): void
 
     $state = getTgState($chatId);
 
-    // حالة انتظار نص البث
     if (($state['action'] ?? '') === 'awaiting_broadcast') {
         handleTgBroadcastText($chatId, $text, $state);
         return;
     }
-    // حالة انتظار بروكسيات جديدة
     if (($state['action'] ?? '') === 'awaiting_proxies') {
         handleTgProxiesInput($chatId, $text);
         return;
     }
-    // حالة انتظار QR Code للهدية
     if (($state['action'] ?? '') === 'awaiting_qr') {
         handleTgQrInput($chatId, $text);
         return;
     }
+    if (($state['action'] ?? '') === 'awaiting_match_time') {
+        handleTgMatchTimeInput($chatId, $text);
+        return;
+    }
 
-    // أوامر
     switch ($text) {
         case '/start':
         case '/help':
@@ -569,6 +753,12 @@ function handleTelegramUpdate(array $update): void
         case '/matchgift':
             handleTgMatchGift($chatId);
             break;
+        case '/matchsuccess':
+            handleTgMatchSuccess($chatId);
+            break;
+        case '/setmatchtime':
+            handleTgSetMatchTime($chatId);
+            break;
         case '/cancel':
             clearTgState($chatId);
             tgSendMessage($chatId, '✅ تم إلغاء العملية الحالية.');
@@ -585,12 +775,16 @@ function sendTgMainMenu(string $chatId): void
     $status  = $cfg['enabled'] ? '✅ مفعّلة' : '❌ معطلة';
     $qr      = $cfg['qr_code'];
     $label   = $cfg['gift_label'];
+    $matchTime = $cfg['match_date'] ?? 'غير محدد';
+    $successCount = getMatchGiftSuccessCount(24);
 
     $text = "🤖 <b>لوحة تحكم Tasjil BOT</b>\n\n"
           . "📊 اختر أمراً من القائمة أدناه:\n\n"
           . "━━━━━━━━━━━━━━━━━━━━\n"
           . "🎁 هدية المباراة: <b>{$status}</b>\n"
           . "📦 الهدية: <b>{$label}</b>\n"
+          . "🕐 وقت المباراة: <code>{$matchTime}</code>\n"
+          . "✅ مفعّل خلال 24س: <b>{$successCount}</b>\n"
           . "🔗 QR: <code>{$qr}</code>\n"
           . "━━━━━━━━━━━━━━━━━━━━";
 
@@ -608,7 +802,11 @@ function sendTgMainMenu(string $chatId): void
             ['text' => '✏️ تغيير QR Code',          'callback_data' => 'tg_set_qr'],
         ],
         [
-            ['text' => '🔄 تحديث البروكسيات (API)',  'callback_data' => 'tg_refresh_proxies'],
+            ['text' => '🕐 تحديد وقت المباراة',     'callback_data' => 'tg_set_match_time'],
+            ['text' => '✅ الناجحين (24س)',         'callback_data' => 'tg_match_success'],
+        ],
+        [
+            ['text' => '🔄 تحديث البروكسيات (API)', 'callback_data' => 'tg_refresh_proxies'],
         ],
     ];
 
@@ -639,6 +837,12 @@ function handleTgCallback(string $chatId, int $msgId, string $data): void
         case 'tg_refresh_proxies':
             handleTgRefreshProxies($chatId);
             break;
+        case 'tg_match_success':
+            handleTgMatchSuccess($chatId);
+            break;
+        case 'tg_set_match_time':
+            handleTgSetMatchTime($chatId);
+            break;
         case 'tg_broadcast_all':
             setTgState($chatId, ['action' => 'awaiting_broadcast', 'target' => 'all']);
             tgSendMessage($chatId, "📝 أرسل نص الإعلان الذي تريد إرساله لـ <b>جميع المستخدمين</b>:\n\n/cancel للإلغاء");
@@ -648,7 +852,6 @@ function handleTgCallback(string $chatId, int $msgId, string $data): void
             tgSendMessage($chatId, "📝 أرسل نص الإعلان الذي تريد إرساله للمستخدمين <b>النشطين (7 أيام)</b>:\n\n/cancel للإلغاء");
             break;
         default:
-            // broadcast confirm
             if (str_starts_with($data, 'tg_confirm_broadcast_')) {
                 $broadcastId = substr($data, strlen('tg_confirm_broadcast_'));
                 executeBroadcast($chatId, $broadcastId);
@@ -663,20 +866,90 @@ function handleTgStats(string $chatId): void
     $stats   = getUserStats();
     $proxies = loadProxies();
     $cfg     = getMatchGiftConfig();
+    $successCount = getMatchGiftSuccessCount(24);
 
     $text = "📊 <b>إحصائيات Tasjil BOT</b>\n\n"
           . "👥 إجمالي المستخدمين: <b>{$stats['total']}</b>\n"
           . "🟢 نشط (7 أيام): <b>{$stats['active_7d']}</b>\n"
           . "🟡 نشط (30 يوم): <b>{$stats['active_30d']}</b>\n\n"
           . "🔗 عدد البروكسيات: <b>" . count($proxies) . "</b>\n"
-          . "🎁 هدية المباراة: <b>" . ($cfg['enabled'] ? '✅ مفعّلة' : '❌ معطلة') . "</b>\n\n"
+          . "🎁 هدية المباراة: <b>" . ($cfg['enabled'] ? '✅ مفعّلة' : '❌ معطلة') . "</b>\n"
+          . "✅ مفعّل خلال 24س: <b>{$successCount}</b>\n\n"
           . "📅 التاريخ: " . date('Y-m-d H:i:s');
 
     $keyboard = [[['text' => '🔙 رجوع', 'callback_data' => 'tg_stats']]];
     tgSendMessage($chatId, $text, $keyboard);
 }
 
-// ─── Broadcast ───────────────────────────────────────────────────────────────
+// ─── Match Success ──────────────────────────────────────────────────────────
+function handleTgMatchSuccess(string $chatId): void
+{
+    $list = getMatchGiftSuccessList(24);
+    $count = count($list);
+    
+    if ($count === 0) {
+        tgSendMessage($chatId, "📊 لا يوجد مفعّلين لهدية المباراة خلال الـ 24 ساعة الماضية.");
+        sendTgMainMenu($chatId);
+        return;
+    }
+    
+    $text = "✅ <b>المفعّلين لهدية المباراة (آخر 24 ساعة)</b>\n\n";
+    $text .= "👥 العدد: <b>{$count}</b>\n\n";
+    $text .= "━━━━━━━━━━━━━━━━━━━━\n";
+    
+    foreach ($list as $i => $entry) {
+        $msisdn = $entry['msisdn'] ?? 'غير معروف';
+        $label = $entry['label'] ?? 'غير معروف';
+        $date = $entry['date'] ?? 'غير معروف';
+        $masked = substr($msisdn, 0, 4) . 'xxxx' . substr($msisdn, -2);
+        $text .= ($i + 1) . ". 📱 {$masked}\n";
+        $text .= "   🎁 {$label}\n";
+        $text .= "   🕐 {$date}\n\n";
+    }
+    
+    $keyboard = [[['text' => '🔙 رجوع', 'callback_data' => 'tg_stats']]];
+    tgSendMessage($chatId, $text, $keyboard);
+}
+
+function handleTgSetMatchTime(string $chatId): void
+{
+    setTgState($chatId, ['action' => 'awaiting_match_time']);
+    tgSendMessage($chatId,
+        "📅 <b>تحديد وقت مباراة الجزائر</b>\n\n"
+        . "أرسل وقت المباراة بالصيغة التالية:\n"
+        . "<code>YYYY-MM-DD HH:MM:SS</code>\n\n"
+        . "مثال: <code>2026-07-02 20:00:00</code>\n\n"
+        . "سيتم حساب الوقت المتبقي تلقائياً وإظهاره للمستخدمين.\n"
+        . "/cancel للإلغاء"
+    );
+}
+
+function handleTgMatchTimeInput(string $chatId, string $text): void
+{
+    if ($text === '/cancel') {
+        clearTgState($chatId);
+        tgSendMessage($chatId, '❌ تم الإلغاء.');
+        return;
+    }
+    
+    $format = 'Y-m-d H:i:s';
+    $date = DateTime::createFromFormat($format, $text);
+    
+    if (!$date || $date->format($format) !== $text) {
+        tgSendMessage($chatId, "❌ صيغة غير صحيحة. استخدم: YYYY-MM-DD HH:MM:SS\nمثال: 2026-07-02 20:00:00");
+        return;
+    }
+    
+    $cfg = getMatchGiftConfig();
+    $cfg['match_date'] = $text;
+    saveMatchGiftConfig($cfg);
+    
+    clearTgState($chatId);
+    tgSendMessage($chatId, "✅ تم تحديد وقت المباراة: <code>{$text}</code>\n\nسيظهر الوقت المتبقي للمستخدمين تلقائياً.");
+    sendTgMainMenu($chatId);
+}
+
+// ─── Broadcast ──────────────────────────────────────────────────────────────
 function handleTgBroadcastStart(string $chatId): void
 {
     $stats = getUserStats();
@@ -706,7 +979,6 @@ function handleTgBroadcastText(string $chatId, string $text, array $state): void
     $target      = $state['target'] ?? 'all';
     $broadcastId = 'bc_' . time() . '_' . substr(md5($text), 0, 6);
 
-    // حفظ بيانات البث للتأكيد
     setTgState($chatId, [
         'action'       => 'pending_broadcast',
         'target'       => $target,
@@ -763,7 +1035,7 @@ function executeBroadcast(string $chatId, string $broadcastId): void
         } else {
             $failed++;
         }
-        usleep(80000); // 80ms delay لتجنب الحظر
+        usleep(80000);
     }
 
     $summary = "✅ <b>اكتمل الإعلان</b>\n\n"
@@ -823,10 +1095,8 @@ function handleTgProxiesInput(string $chatId, string $text): void
 {
     if ($text === '/cancel') { clearTgState($chatId); tgSendMessage($chatId, '❌ تم الإلغاء.'); return; }
 
-    // محاولة JSON
     $list = @json_decode($text, true);
     if (!is_array($list)) {
-        // سطر بسطر
         $list = array_filter(array_map('trim', explode("\n", $text)));
         $list = array_values($list);
     }
@@ -836,7 +1106,6 @@ function handleTgProxiesInput(string $chatId, string $text): void
         return;
     }
 
-    // التحقق من الصيغة
     $valid = [];
     foreach ($list as $item) {
         $item = trim($item);
@@ -864,7 +1133,7 @@ function handleTgRefreshProxies(string $chatId): void
     sendTgMainMenu($chatId);
 }
 
-// ─── Match Gift ───────────────────────────────────────────────────────────────
+// ─── Match Gift ─────────────────────────────────────────────────────────────
 function handleTgToggleMatch(string $chatId): void
 {
     $cfg = getMatchGiftConfig();
@@ -920,10 +1189,9 @@ function handleTgQrInput(string $chatId, string $text): void
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Webhook Routing — Facebook & Telegram
+// Webhook Routing
 // ════════════════════════════════════════════════════════════════════════════
 if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    // Facebook Verify
     if (isset($_GET['hub_mode'], $_GET['hub_verify_token'], $_GET['hub_challenge'])
         && $_GET['hub_mode'] === 'subscribe'
         && $_GET['hub_verify_token'] === VERIFY_TOKEN) {
@@ -946,13 +1214,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (!$data) exit;
 
-    // ── Telegram Update ──────────────────────────────────────────────────────
     if (isset($data['update_id'])) {
         handleTelegramUpdate($data);
         exit;
     }
 
-    // ── Facebook Update ──────────────────────────────────────────────────────
     if (($data['object'] ?? '') !== 'page') exit;
 
     foreach ($data['entry'] as $entry) {
@@ -1010,7 +1276,6 @@ function processEvent(string $psid, array $event): void
     $digits = preg_replace('/\D/', '', $text);
     if ($text === '') { if ($isNew) sendWelcomeNew($psid); else sendWelcome($psid); return; }
 
-    // Admin Broadcast
     if (preg_match('/@#(.+?)@#/su', $text, $adMatch)) { handleAdminBroadcast($psid, trim($adMatch[1])); return; }
 
     $session = getSession($psid);
@@ -1037,10 +1302,18 @@ function processEvent(string $psid, array $event): void
             $cfg  = getMatchGiftConfig();
             $sess = getSession($psid);
             $user = getUser($psid);
+            
             if (!$cfg['enabled']) {
                 sendMessage($psid, "⏰ هدية المباراة غير متاحة حالياً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott");
                 return;
             }
+            
+            $status = getMatchGiftStatus();
+            if ($status['status'] === 'waiting') {
+                sendMessage($psid, "{$status['message']}\n\n🎁 هدية المباراة متوفرة عند انطلاق المباراة مباشرة.\n\n📌 تابع قناتنا: https://t.me/tasjilbott");
+                return;
+            }
+            
             if (!$user || empty($user['access_token'])) {
                 sendMessage($psid, "⚠️ يجب تسجيل الدخول أولاً، أرسل رقم هاتفك.");
                 return;
@@ -1202,6 +1475,7 @@ function handleNewPhone(string $psid, string $phone): void
     }
     sendOTPAndWait($psid, $msisdn, $phone);
 }
+
 function sendOTPAndWait(string $psid, string $msisdn, string $phone): void
 {
     if (sendDjezzyOTP($msisdn)) {
@@ -1213,6 +1487,7 @@ function sendOTPAndWait(string $psid, string $msisdn, string $phone): void
         sendMessage($psid, "سيرفر جازي غير متاح حاليا نعمل على اصلاحه 🧑‍🔧 يمكنك التسجيل عبر التطبيق الخاص بنا رابط تحميله https://dev-tasjilapp.pantheonsite.io/wp-admin/Tasjil-APP-Downlod/update.php");
     }
 }
+
 function sendNewOTPAndWaitForOffer(string $psid, string $msisdn, string $phone, string $packageCode): void
 {
     if (sendDjezzyOTPNew($msisdn)) {
@@ -1297,33 +1572,8 @@ function handlePostback(string $psid, string $payload): void
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// Algeria Match Gift — يتحكم بها من تلقرام
+// Algeria Match Gift — النسخة المحسنة مع Queue
 // ════════════════════════════════════════════════════════════════════════════
-function sendAlgeriaMatchGiftPromo(string $psid): void
-{
-    $cfg = getMatchGiftConfig();
-    if (!$cfg['enabled']) return;
-
-    $label = $cfg['gift_label'];
-    fbApiCall(json_encode([
-        'recipient'      => ['id' => $psid],
-        'messaging_type' => 'RESPONSE',
-        'message'        => [
-            'text' =>
-                "🇩🇿🔥 هدية خاصة في اليوم الذي تلعب فيه الجزائر مباراة ⚽!\n\n" .
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n" .
-                "🎁 احصل على {$label} مجاناً 🎉\n\n" .
-                "━━━━━━━━━━━━━━━━━━━━━━\n\n" .
-                "📩 أرسل الرقم 30 للتفعيل الفوري",
-            'quick_replies' => [[
-                'content_type' => 'text',
-                'title'        => '🇩🇿 تفعيل هدية المباراة',
-                'payload'      => 'ACTIVATE_ALGERIA_MATCH',
-            ]],
-        ],
-    ], JSON_UNESCAPED_UNICODE));
-}
-
 function activateAlgeriaMatchGift(string $psid, array $user): void
 {
     $cfg = getMatchGiftConfig();
@@ -1333,15 +1583,41 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
     }
 
     $rl = checkRateLimit($psid);
-    if ($rl !== null) { sendMessage($psid, rateLimitMessage($rl)); return; }
+    if ($rl !== null) {
+        sendMessage($psid, rateLimitMessage($rl));
+        return;
+    }
+
+    if (!$user || empty($user['access_token'])) {
+        sendMessage($psid, "⚠️ يجب تسجيل الدخول أولاً، أرسل رقم هاتفك.");
+        return;
+    }
+
+    $queued = enqueueRequest($psid, 'match_gift', [
+        'msisdn' => $user['msisdn'] ?? '',
+        'access_token' => $user['access_token'] ?? '',
+    ]);
+
+    if (!$queued) {
+        sendMessage($psid, "⚠️ هناك ازدحام حالياً، يرجى المحاولة بعد دقيقة.\n\n✅ سيتم تسجيل طلبك تلقائياً إذا انتظرت قليلاً.");
+        return;
+    }
+
+    sendMessage($psid, "✅ تم تسجيل طلبك بنجاح!\n\n🔄 جاري تفعيل هدية المباراة...\n⏳ سيتم إعلامك بالنتيجة خلال دقائق.\n\n📌 لا تغلق المحادثة حتى تصلك رسالة التأكيد.");
+}
+
+function activateAlgeriaMatchGiftInternal(string $psid, array $user): array
+{
+    $cfg = getMatchGiftConfig();
+    if (!$cfg['enabled']) {
+        return ['success' => false, 'message' => '⏰ هدية المباراة غير متاحة حالياً.'];
+    }
 
     $msisdn        = $user['msisdn'];
     $accessToken   = $user['access_token'];
     $displayMasked = substr($msisdn, 0, 4) . 'xxxx' . substr($msisdn, -2);
     $qrCode        = $cfg['qr_code'];
     $label         = $cfg['gift_label'];
-
-    sendMessage($psid, "🔄 جاري تفعيل هدية مباراة الجزائر 🇩🇿...");
 
     $url     = "https://apim.djezzy.dz/mobile-api/api/v1/services/scan/activate-reward/{$msisdn}";
     $payload = json_encode(['qrCode' => $qrCode]);
@@ -1356,42 +1632,69 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
     $raw = curlWithAllProxies($url, 'POST', $payload, $headers, 'MATCH_GIFT', 12, '/tmp/match_gift.log');
 
     if ($raw === null) {
-        sendMessage($psid, "❌ حدث خطأ أثناء تفعيل الهدية. يرجى المحاولة مجدداً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott");
-        return;
+        return ['success' => false, 'message' => "❌ حدث خطأ أثناء تفعيل الهدية. يرجى المحاولة مجدداً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott"];
     }
 
     $httpCode = $raw['http_code'];
 
     if ($httpCode === 200 || $httpCode === 201) {
         recordFinalResult($psid);
-        sendMessage($psid,
-            "🎉 تم تفعيل الهدية بنجاح!\n\n" .
-            "استمتع بمباراة الجزائر 🇩🇿⚽\n\n" .
-            "✅ الرقم: {$displayMasked}\n" .
-            "🎁 الهدية: {$label}\n\n" .
-            "⚡ قناة التلغرام: https://t.me/tasjilbott"
-        );
-        sendMessage($psid, "\n\n🥰 اذا كنت تريد دعمنا حتى نطور الخدمة ونستمر 🥰\n\n🔴 ادخل للموقع 👇\n\nhttps://timebucks.com/?refID=227870531\n\n✅ وسجل بحساب جوجل فقط 🥰\n\n🥹 ولا تنسَ متابعة حساب المطور 👇\nhttps://www.facebook.com/profile.php?id=100052854003446\n\nوشكراً ❤️");
-        clearSession($psid);
-        return;
+        logMatchGiftSuccess($psid, $msisdn, $label);
+        return [
+            'success' => true,
+            'message' => "🎉 تم تفعيل الهدية بنجاح!\n\nاستمتع بمباراة الجزائر 🇩🇿⚽\n\n✅ الرقم: {$displayMasked}\n🎁 الهدية: {$label}\n\n⚡ قناة التلغرام: https://t.me/tasjilbott\n\n🥰 اذا كنت تريد دعمنا: https://timebucks.com/?refID=227870531"
+        ];
     }
 
     if ($httpCode === 400) {
         recordFinalResult($psid);
-        sendMessage($psid,
-            "⚠️ اما اليوم ليس يوم مباراة الجزائر أو انك استفدت من الهدية مسبقاً أو أن رقمك غير مؤهل لهذه الهدية.\n\n" .
-            "⚡ قناة التلغرام: https://t.me/tasjilbott"
-        );
-        clearSession($psid);
-        return;
+        return [
+            'success' => false,
+            'message' => "⚠️ اما اليوم ليس يوم مباراة الجزائر أو انك استفدت من الهدية مسبقاً أو أن رقمك غير مؤهل لهذه الهدية.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott"
+        ];
     }
 
-    sendMessage($psid, "❌ حدث خطأ أثناء تفعيل الهدية (HTTP {$httpCode}). يرجى المحاولة مجدداً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott");
-    clearSession($psid);
+    return [
+        'success' => false,
+        'message' => "❌ حدث خطأ أثناء تفعيل الهدية (HTTP {$httpCode}). يرجى المحاولة مجدداً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott"
+    ];
+}
+
+function sendAlgeriaMatchGiftPromo(string $psid): void
+{
+    $cfg = getMatchGiftConfig();
+    if (!$cfg['enabled']) return;
+    
+    $status = getMatchGiftStatus();
+    $label = $cfg['gift_label'];
+    
+    $promoText = "🇩🇿🔥 هدية خاصة في اليوم الذي تلعب فيه الجزائر مباراة ⚽!\n\n"
+               . "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+               . "🎁 احصل على {$label} مجاناً 🎉\n\n";
+    
+    if ($status['status'] === 'waiting') {
+        $promoText .= "⏳ " . $status['message'] . "\n\n";
+    }
+    
+    $promoText .= "━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                . "📩 أرسل الرقم 30 للتفعيل الفوري";
+    
+    fbApiCall(json_encode([
+        'recipient'      => ['id' => $psid],
+        'messaging_type' => 'RESPONSE',
+        'message'        => [
+            'text' => $promoText,
+            'quick_replies' => [[
+                'content_type' => 'text',
+                'title'        => '🇩🇿 تفعيل هدية المباراة',
+                'payload'      => 'ACTIVATE_ALGERIA_MATCH',
+            ]],
+        ],
+    ], JSON_UNESCAPED_UNICODE));
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// activateOffer — قديم ثم جديد
+// activateOffer — قديم
 // ════════════════════════════════════════════════════════════════════════════
 function activateOffer(string $psid, array $user, string $packageCode): void
 {
@@ -1452,7 +1755,6 @@ function activateOffer(string $psid, array $user, string $packageCode): void
         }
     }
 
-    // فشل — جرب الجديدة
     clearPending($psid);
     sendMessage($psid, "⚠️ تعذر تفعيل العرض بالطريقة الأولى، جارٍ تجربة طريقة أخرى...");
     $phoneDisplay = '0' . substr($msisdn, 3);
@@ -1491,7 +1793,6 @@ function activateOfferNew(string $psid, array $user, string $packageCode): void
     for ($attempt = 1; $attempt <= $maxAttempts; $attempt++) {
         $payload = json_encode(['data' => ['id' => $packageCode, 'type' => 'products']]);
 
-        // تحديث Authorization header عند تجديد التوكن
         $hdrs = $headers;
         foreach ($hdrs as &$h) {
             if (str_starts_with($h, 'Authorization:')) {
@@ -1992,6 +2293,7 @@ function fetchSubscriptionHistory(string $msisdn, string $accessToken): ?array
     if (is_array($json) && ($json['status'] ?? 0) == 200) return $json['data'] ?? [];
     return null;
 }
+
 function getLastWalkWinDate(array $history): ?int
 {
     foreach ($history as $item) {
@@ -2003,6 +2305,7 @@ function getLastWalkWinDate(array $history): ?int
     }
     return null;
 }
+
 function formatTimeRemaining(int $secondsLeft): string
 {
     if ($secondsLeft <= 0) return "0 ثانية";
@@ -2039,6 +2342,7 @@ function refreshAccessToken(string $refreshToken, string $msisdn, string $psid):
     }
     return false;
 }
+
 function refreshTokenRequest(string $refreshToken, string $proxyHost, string $proxyAuth): mixed
 {
     $r = djezzyCurl('https://apim.djezzy.dz/oauth2/token',
@@ -2071,6 +2375,7 @@ function refreshAccessTokenNew(string $refreshToken, string $msisdn, string $psi
     }
     return false;
 }
+
 function refreshTokenRequestNew(string $refreshToken, string $proxyHost, string $proxyAuth): mixed
 {
     $r = djezzyCurl('https://apim.djezzy.dz/oauth2/token',
@@ -2095,6 +2400,7 @@ function sendDjezzyOTP(string $msisdn): bool
     }
     return false;
 }
+
 function verifyOTP(string $msisdn, string $otp): mixed
 {
     foreach (getAllProxies() as $p) {
@@ -2105,6 +2411,7 @@ function verifyOTP(string $msisdn, string $otp): mixed
     }
     return false;
 }
+
 function djezzyTokenReq(string $msisdn, string $otp, string $ph, string $pa): mixed
 {
     $r = djezzyCurl('https://apim.djezzy.dz/oauth2/token',
@@ -2129,6 +2436,7 @@ function sendDjezzyOTPNew(string $msisdn): bool
     }
     return false;
 }
+
 function verifyOTPNew(string $msisdn, string $otp): mixed
 {
     foreach (getAllProxies() as $p) {
@@ -2139,6 +2447,7 @@ function verifyOTPNew(string $msisdn, string $otp): mixed
     }
     return false;
 }
+
 function djezzyTokenReqNew(string $msisdn, string $otp, string $ph, string $pa): mixed
 {
     $r = djezzyCurl('https://apim.djezzy.dz/oauth2/token',
@@ -2203,6 +2512,7 @@ function sendWelcomeNew(string $psid): void
         "👋 أهلاً وسهلاً بك في Tasjil BOT! 🎉\n\n🌟 نرحب بك كمستخدم جديد!\n\n📌 مزايا البوت:\n\n✅ تفعيل 2G الأسبوعية 🎁\n✅ إرسال الدعوات 📨\n✅ تفعيل عرض 4GB بـ 70دج 🏷️\n✅ جميع عروض الإنترنت متوفرة ⭐\n\n━━━━━━━━━━━━━━\n\n📱 للبدء، أرسل رقم هاتفك (جيزي)\n🔹 مثال: 0770000000\n\n⚡ قناة التلغرام:\nhttps://t.me/tasjilbott"
     );
 }
+
 function sendWelcome(string $psid): void { sendMessage($psid, "يرجى ارسال أرقام هواتف فقط 📱\n"); }
 
 function sendMenu(string $psid): void
@@ -2287,10 +2597,6 @@ function sendMoreOffers(string $psid): void
 // ════════════════════════════════════════════════════════════════════════════
 // Facebook Send Helpers
 // ════════════════════════════════════════════════════════════════════════════
-
-/**
- * sendFbMessage — يُعيد true/false بدل void لدعم البث
- */
 function sendFbMessage(string $psid, string $text): bool
 {
     $ch = curl_init('https://graph.facebook.com/v19.0/me/messages?access_token=' . FB_TOKEN);
@@ -2312,8 +2618,16 @@ function sendFbMessage(string $psid, string $text): bool
 
 function sendMessage(string $psid, string $text): void
 {
+    static $lastCall = 0;
+    $now = microtime(true);
+    if ($now - $lastCall < 0.05) {
+        usleep(50000);
+    }
+    $lastCall = $now;
+    
     fbApiCall(json_encode(['recipient' => ['id' => $psid], 'message' => ['text' => $text], 'messaging_type' => 'RESPONSE'], JSON_UNESCAPED_UNICODE));
 }
+
 function fbApiCall(string $payload): void
 {
     $ch = curl_init('https://graph.facebook.com/v19.0/me/messages?access_token=' . FB_TOKEN);
@@ -2331,3 +2645,14 @@ function fbApiCall(string $payload): void
     curl_close($ch);
     file_put_contents('/tmp/fb_send.log', date('Y-m-d H:i:s') . " ERR:$err RESP:$resp\n", FILE_APPEND);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// معالجة قائمة الانتظار بعد كل طلب
+// ════════════════════════════════════════════════════════════════════════════
+register_shutdown_function(function() {
+    try {
+        processQueue();
+    } catch (Throwable $e) {
+        dbg("[QUEUE_ERROR] " . $e->getMessage());
+    }
+});
