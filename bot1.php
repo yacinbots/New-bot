@@ -17,7 +17,7 @@ define('FB_TOKEN',        'EAAFYLlWaXQkBRmeSVCCkTskO6L3TDqBURP0I1DGsPlZADbPdKqhp
 define('VERIFY_TOKEN',    'Yacin');
 
 // ════════ Telegram Config ════════
-define('TG_TOKEN',   '8723811941:AAFoBZwvuaU4ccWaWcHSFMQHZDlUBPeJT_M');
+define('TG_TOKEN',   '8723811941:AAGi5C0AwV-G45PAoou2rYOZJovI5AmhdJM');
 define('TG_ADMIN_ID', '8499896271');
 define('TG_API',     'https://api.telegram.org/bot' . TG_TOKEN);
 
