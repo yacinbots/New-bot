@@ -13,7 +13,7 @@ $sender_id = $event['sender']['id'] ?? null;
 $message   = $event['message']['text'] ?? '';
 
 // ════════ Facebook Config ════════
-define('FB_TOKEN',        'EAAFYLlWaXQkBRmeSVCCkTskO6L3TDqBURP0I1DGsPlZADbPdKqhpJjMtsoP4Cr1bjeMPDHzlOSs0M4dcgW9uZBu6ma96nWqQ3K1qLstmXIXZBeRZBqMFsd7ecjihBU6fODYSZBxdbcy5q32Suz0gWmO05a9qao8E1VB3XRRHUa6db5khqyuuHfVhLYbdiXYpHjG0v53jGkwZDZD');
+define('FB_TOKEN',        'EAAOjCFcfYCQBR3cSdYQBrFBUXeZCu2YPDyIB6wod1g0SbZANQyZAIZCPccB2rsgSKxUvGsvpCnx9WNH9FHt0wogQQbxzfiTWpEjrmh2jU9ivL4np2XQ9NIZCtGBnK9LlWHP58C7GcoSirV7UYH5RvJhX9AWq45agGdO6g8YjPdkeq78iB1O3Pl2vW3QwAz7RwK5mkGkW9dQZDZD');
 define('VERIFY_TOKEN',    'Yacin');
 
 // ════════ Telegram Config ════════
