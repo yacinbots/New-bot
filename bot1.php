@@ -1,23 +1,18 @@
 <?php
 // ════════════════════════════════════════════════════════════════════════════
-// TASJIL BOT — Facebook Messenger + Telegram Admin Bot
+// TASJIL BOT — نسخة ملف واحد عبر ويبهوك (Facebook Messenger + Telegram Admin Bot)
 // ════════════════════════════════════════════════════════════════════════════
-
-if (!isset($input)) {
-    $input = json_decode(file_get_contents("php://input"), true);
-}
-if (!isset($event)) {
-    $event = $input['entry'][0]['messaging'][0] ?? [];
-}
-$sender_id = $event['sender']['id'] ?? null;
-$message   = $event['message']['text'] ?? '';
+// هذا الملف يستقبل الرسائل عبر ويبهوك حقيقي (POST مباشر من فيسبوك/تلغرام عبر
+// nginx + PHP-FPM). يحتوي كل تحسينات الأداء (تخزين مؤقت للبروكسيات، تجديد
+// التوكن التلقائي، إصلاح التكرار) التي كانت السبب في تسريع النسخة السابقة.
+// ════════════════════════════════════════════════════════════════════════════
 
 // ════════ Facebook Config ════════
 define('FB_TOKEN',        'EAAFYLlWaXQkBSD9gr170GVkhchLOmWZB3CG8trMYJlt8VxnZCP0ZC6PImfGzlh7Bs41DbOAJWjzva7gYDe10aIyTEQHCbZAONhqWZCZCbfnjR0xZCnJRnlB4ZCBTkWGidLobns8VXIIb2IBuZChwCLENVepPeY6HEghzg1CpyZAy1UhELTpKllwXRsv75OvCiNuQNgoZBfZBhpzrHwZDZD');
 define('VERIFY_TOKEN',    'Yacin');
 
 // ════════ Telegram Config ════════
-define('TG_TOKEN',   '8723811941:AAGi5C0AwV-G45PAoou2rYOZJovI5AmhdJM');
+define('TG_TOKEN',   '8723811941:AAFoBZwvuaU4ccWaWcHSFMQHZDlUBPeJT_M');
 define('TG_ADMIN_ID', '8499896271');
 define('TG_API',     'https://api.telegram.org/bot' . TG_TOKEN);
 
@@ -34,6 +29,11 @@ define('RATE_LIMIT_DIR',   '/tmp/fb_rate_limit');
 define('TG_STATE_DIR',     '/tmp/tg_states');
 define('MATCH_GIFT_FILE',  '/tmp/match_gift_config.json');
 define('BROADCAST_LOG',    '/tmp/broadcast_log.json');
+
+// ════════ Queue (جديد) — الفصل بين الويبهوك والمعالجة ════════
+define('WORKER_LOG',           '/tmp/worker.log');
+define('PROXY_API_CACHE_FILE', '/tmp/proxies_api_cache.json');
+define('PROXY_API_CACHE_TTL',  300); // ثواني — لا تُعاد جلب قائمة API إلا كل 5 دقائق
 
 define('RATE_LIMIT_SECONDS', 600);
 
@@ -118,18 +118,91 @@ define('OFFER_SHORTCUTS', [
 // ════════════════════════════════════════════════════════════════════════════
 // SQLite — Dedup + User Lock
 // ════════════════════════════════════════════════════════════════════════════
-function getDB(): PDO
+function getDB(bool $forceFresh = false): PDO
 {
     static $db = null;
+    if ($forceFresh) { $db = null; } // إجباري بعد fork — اتصال PDO غير آمن للمشاركة بين عمليات
     if ($db !== null) return $db;
     $db = new PDO('sqlite:' . DB_FILE);
     $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;");
+    $db->exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA busy_timeout=5000;");
     $db->exec("CREATE TABLE IF NOT EXISTS processed_events (event_id TEXT PRIMARY KEY, created_at INTEGER NOT NULL)");
     $db->exec("CREATE TABLE IF NOT EXISTS user_locks (psid TEXT PRIMARY KEY, locked_at INTEGER NOT NULL)");
+    $db->exec("CREATE TABLE IF NOT EXISTS event_queue (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT    NOT NULL,      -- 'fb' أو 'tg'
+        psid        TEXT,                 -- المعرف (فارغ لتيليجرام العام)
+        payload     TEXT    NOT NULL,      -- JSON للحدث الكامل
+        status      TEXT    NOT NULL DEFAULT 'pending', -- pending | claimed
+        created_at  INTEGER NOT NULL,
+        claimed_at  INTEGER
+    )");
+    $db->exec("CREATE INDEX IF NOT EXISTS idx_queue_status ON event_queue(status, id)");
     $db->exec("DELETE FROM processed_events WHERE created_at < " . (time() - 3600));
     $db->exec("DELETE FROM user_locks WHERE locked_at < " . (time() - 600));
     return $db;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// طابور الأحداث (Event Queue) — يكتب فيه webhook.php، ويقرأ منه worker.php
+// ════════════════════════════════════════════════════════════════════════════
+function enqueueEvent(string $kind, ?string $psid, array $payload): void
+{
+    try {
+        $s = getDB()->prepare(
+            "INSERT INTO event_queue (kind, psid, payload, status, created_at) VALUES (?,?,?,'pending',?)"
+        );
+        $s->execute([$kind, $psid, json_encode($payload, JSON_UNESCAPED_UNICODE), time()]);
+    } catch (Throwable $e) {
+        dbg("[QUEUE][ERR] enqueue failed: " . $e->getMessage());
+    }
+}
+
+/**
+ * claimQueueBatch — يحجز مجموعة من الأحداث المعلّقة بأمان (آمن حتى مع عدة عمال متوازيين)
+ */
+function claimQueueBatch(int $limit = 20): array
+{
+    $db = getDB();
+    // أعد تحرير أي عناصر بقيت "محجوزة" لأكثر من دقيقتين (يعني العامل الذي حجزها تعطّل)
+    $db->exec("UPDATE event_queue SET status='pending', claimed_at=NULL
+               WHERE status='claimed' AND claimed_at < " . (time() - 120));
+
+    $ids = [];
+    $stmt = $db->prepare("SELECT id FROM event_queue WHERE status='pending' ORDER BY id ASC LIMIT ?");
+    $stmt->bindValue(1, $limit, PDO::PARAM_INT);
+    $stmt->execute();
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $id) $ids[] = (int)$id;
+    if (!$ids) return [];
+
+    $in = implode(',', array_fill(0, count($ids), '?'));
+    $upd = $db->prepare("UPDATE event_queue SET status='claimed', claimed_at=? WHERE id IN ($in) AND status='pending'");
+    $upd->execute(array_merge([time()], $ids));
+
+    $sel = $db->prepare("SELECT id, kind, psid, payload FROM event_queue WHERE id IN ($in)");
+    $sel->execute($ids);
+    return $sel->fetchAll(PDO::FETCH_ASSOC);
+}
+
+function deleteQueueItem(int $id): void
+{
+    try { getDB()->prepare("DELETE FROM event_queue WHERE id=?")->execute([$id]); } catch (Throwable $e) {}
+}
+
+/**
+ * requeueItem — يعيد عنصراً محجوزاً إلى "pending" (يُستخدم عندما يكون المستخدم
+ * مقفولاً بمعالجة سابقة، حتى يُعاد تجربته في الدورة القادمة بدل حذفه أو فقدانه)
+ */
+function requeueItem(int $id): void
+{
+    try { getDB()->prepare("UPDATE event_queue SET status='pending', claimed_at=NULL WHERE id=?")->execute([$id]); }
+    catch (Throwable $e) {}
+}
+
+function countQueuePending(): int
+{
+    try { return (int)getDB()->query("SELECT COUNT(*) FROM event_queue WHERE status='pending'")->fetchColumn(); }
+    catch (Throwable $e) { return -1; }
 }
 function tryMarkEvent(string $id): bool
 {
@@ -137,7 +210,10 @@ function tryMarkEvent(string $id): bool
         $s = getDB()->prepare("INSERT OR IGNORE INTO processed_events (event_id, created_at) VALUES (?,?)");
         $s->execute([$id, time()]);
         return $s->rowCount() > 0;
-    } catch (Throwable $e) { return true; }
+    } catch (Throwable $e) {
+        dbg("[DB_ERR] tryMarkEvent($id): " . $e->getMessage());
+        return false; // عند الشك، لا تُعالج — أفضل من معالجة مكررة
+    }
 }
 function unmarkEvent(string $id): void
 {
@@ -149,7 +225,10 @@ function tryLockUser(string $psid): bool
         $s = getDB()->prepare("INSERT OR IGNORE INTO user_locks (psid, locked_at) VALUES (?,?)");
         $s->execute([$psid, time()]);
         return $s->rowCount() > 0;
-    } catch (Throwable $e) { return true; }
+    } catch (Throwable $e) {
+        dbg("[DB_ERR] tryLockUser($psid): " . $e->getMessage());
+        return false; // عند الشك، لا تمنح القفل — أفضل من سماح معالجتين متزامنتين لنفس المستخدم
+    }
 }
 function unlockUser(string $psid): void
 {
@@ -305,37 +384,9 @@ function loadProxies(): array
         if (is_array($d) && count($d) > 0) return $d;
     }
     return [
-    "http://gate.kookeey.info:1000:6922252-d6a8d87b51:9a981add8a-DZ-02326339-1m",
-    "http://gate.kookeey.info:1000:6922252-d6a8d87b51:9a981add8a-DZ-90188864-1m",
-    "http://gate.kookeey.info:1000:6922252-d6a8d87b51:9a981add8a-DZ-90442202-1m",
-    "http://gate.kookeey.info:1000:6922252-d6a8d87b51:9a981add8a-DZ-91355326-1m",
-    "http://gate.kookeey.info:1000:6922252-d6a8d87b51:9a981add8a-DZ-40519545-1m",
-    "http://mobile.kookeey.info:1086:6922252-d6a8d87b51:9a981add8a-DZ-80722182-1m",
-    "http://mobile.kookeey.info:1086:6922252-d6a8d87b51:9a981add8a-DZ-26644934-1m",
-    "http://mobile.kookeey.info:1086:6922252-d6a8d87b51:9a981add8a-DZ-03441653-1m",
-    "http://mobile.kookeey.info:1086:6922252-d6a8d87b51:9a981add8a-DZ-29368732-1m",
-    "http://mobile.kookeey.info:1086:6922252-d6a8d87b51:9a981add8a-DZ-60340145-1m",
-    "http://gate.kookeey.info:1000:4725188-2bf0566d5d:f27eabc915-DZ-79999531-1m",
-    "http://gate.kookeey.info:1000:4725188-2bf0566d5d:f27eabc915-DZ-04078101-1m",
-    "http://gate.kookeey.info:1000:4725188-2bf0566d5d:f27eabc915-DZ-31559785-1m",
-    "http://gate.kookeey.info:1000:4725188-2bf0566d5d:f27eabc915-DZ-95052284-1m",
-    "http://gate.kookeey.info:1000:4725188-2bf0566d5d:f27eabc915-DZ-28276664-1m",
-    "http://mobile.kookeey.info:1086:4725188-2bf0566d5d:f27eabc915-DZ-32298696-1m",
-    "http://mobile.kookeey.info:1086:4725188-2bf0566d5d:f27eabc915-DZ-86945061-1m",
-    "http://mobile.kookeey.info:1086:4725188-2bf0566d5d:f27eabc915-DZ-47524777-1m",
-    "http://mobile.kookeey.info:1086:4725188-2bf0566d5d:f27eabc915-DZ-83185339-1m",
-    "http://mobile.kookeey.info:1086:4725188-2bf0566d5d:f27eabc915-DZ-63490539-1m",
-    "http://gate.kookeey.info:1000:5710151-2919593b9b:0df70e35c3-DZ-53312865-1m",
-    "http://gate.kookeey.info:1000:5710151-2919593b9b:0df70e35c3-DZ-62082167-1m",
-    "http://gate.kookeey.info:1000:5710151-2919593b9b:0df70e35c3-DZ-68899241-1m",
-    "http://gate.kookeey.info:1000:5710151-2919593b9b:0df70e35c3-DZ-92286516-1m",
-    "http://gate.kookeey.info:1000:5710151-2919593b9b:0df70e35c3-DZ-10859378-1m",
-    "http://mobile.kookeey.info:1086:5710151-2919593b9b:0df70e35c3-DZ-83417861-1m",
-    "http://mobile.kookeey.info:1086:5710151-2919593b9b:0df70e35c3-DZ-06028904-1m",
-    "http://mobile.kookeey.info:1086:5710151-2919593b9b:0df70e35c3-DZ-85395572-1m",
-    "http://mobile.kookeey.info:1086:5710151-2919593b9b:0df70e35c3-DZ-27852885-1m",
-    "http://mobile.kookeey.info:1086:5710151-2919593b9b:0df70e35c3-DZ-61847447-1m"
-];
+        "https://change4.owlproxy.com:7778:gip2m6CrMf80_custom_zone_DZ_st__city_sid_00576820_time_5:4986481",
+        "https://change4.owlproxy.com:7778:nDBCZznJ9G90_custom_zone_DZ_st__city_sid_35191153_time_5:4987148"
+    ];
 }
 function saveProxies(array $proxies): void
 {
@@ -362,12 +413,30 @@ function parseProxy(string $proxy): array
 }
 
 /**
- * getAllProxies — تجميع جميع البروكسيات المتاحة (محلية + API)
+ * getCachedApiProxies — يجلب قائمة API من الكاش المحلي إن كانت حديثة (أقل من
+ * PROXY_API_CACHE_TTL ثانية)، ولا يتصل بالـ API الخارجي إلا عند انتهاء صلاحية الكاش.
+ * هذا يمنع إجراء طلب HTTP خارجي بطيء في كل رسالة مستخدم.
+ */
+function getCachedApiProxies(): array
+{
+    if (file_exists(PROXY_API_CACHE_FILE)) {
+        $c = json_decode(@file_get_contents(PROXY_API_CACHE_FILE), true);
+        if (is_array($c) && isset($c['ts'], $c['list']) && is_array($c['list']) && (time() - (int)$c['ts']) < PROXY_API_CACHE_TTL) {
+            return $c['list'];
+        }
+    }
+    $list = refreshProxies();
+    @file_put_contents(PROXY_API_CACHE_FILE, json_encode(['ts' => time(), 'list' => $list]));
+    return $list;
+}
+
+/**
+ * getAllProxies — تجميع جميع البروكسيات المتاحة (محلية + API المخزّنة مؤقتاً)
  */
 function getAllProxies(): array
 {
     $local     = loadProxies();
-    $fromApi   = refreshProxies();
+    $fromApi   = getCachedApiProxies();
     $combined  = array_unique(array_merge($local, $fromApi));
     return array_values($combined);
 }
@@ -382,7 +451,7 @@ function curlWithAllProxies(
     string $payload,
     array  $headers,
     string $logTag,
-    int    $timeout = 12,
+    int    $timeout = 6,
     string $logFile = '/tmp/proxy_curl.log'
 ): ?array {
     $proxies = getAllProxies();
@@ -888,6 +957,7 @@ function handleTgRefreshProxies(string $chatId): void
 {
     tgSendMessage($chatId, '🔄 جاري تحديث البروكسيات من API...');
     $proxies = refreshProxies();
+    @file_put_contents(PROXY_API_CACHE_FILE, json_encode(['ts' => time(), 'list' => $proxies])); // حدّث الكاش فوراً
     tgSendMessage($chatId, "✅ تم تحديث البروكسيات: <b>" . count($proxies) . "</b> بروكسي.");
     sendTgMainMenu($chatId);
 }
@@ -946,61 +1016,6 @@ function handleTgQrInput(string $chatId, string $text): void
     tgSendMessage($chatId, "✅ تم تحديث QR Code:\n<code>{$cfg['qr_code']}</code>");
     sendTgMainMenu($chatId);
 }
-
-// ════════════════════════════════════════════════════════════════════════════
-// Webhook Routing — Facebook & Telegram
-// ════════════════════════════════════════════════════════════════════════════
-if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-    // Facebook Verify
-    if (isset($_GET['hub_mode'], $_GET['hub_verify_token'], $_GET['hub_challenge'])
-        && $_GET['hub_mode'] === 'subscribe'
-        && $_GET['hub_verify_token'] === VERIFY_TOKEN) {
-        http_response_code(200);
-        echo $_GET['hub_challenge'];
-    } else {
-        http_response_code(403);
-        echo 'Forbidden';
-    }
-    exit;
-}
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $rawInput = file_get_contents('php://input');
-    $data     = json_decode($rawInput, true);
-    http_response_code(200);
-    header('Content-Type: text/plain');
-    echo 'EVENT_RECEIVED';
-    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
-
-    if (!$data) exit;
-
-    // ── Telegram Update ──────────────────────────────────────────────────────
-    if (isset($data['update_id'])) {
-        handleTelegramUpdate($data);
-        exit;
-    }
-
-    // ── Facebook Update ──────────────────────────────────────────────────────
-    if (($data['object'] ?? '') !== 'page') exit;
-
-    foreach ($data['entry'] as $entry) {
-        foreach ($entry['messaging'] ?? [] as $event) {
-            $psid = $event['sender']['id'] ?? null;
-            if (!$psid) continue;
-            $eid = buildEventId($psid, $event);
-            if (!tryMarkEvent($eid)) { dbg("[DUP] $psid $eid"); continue; }
-            if (!tryLockUser($psid)) { dbg("[LOCK] $psid busy"); unmarkEvent($eid); continue; }
-            try { processEvent($psid, $event); }
-            catch (Throwable $e) { dbg("[ERR] $psid " . $e->getMessage()); }
-            finally { unlockUser($psid); }
-        }
-    }
-    exit;
-}
-
-http_response_code(200);
-echo 'OK';
-exit;
 
 // ════════════════════════════════════════════════════════════════════════════
 function buildEventId(string $psid, array $event): string
@@ -1239,9 +1254,7 @@ function sendOTPAndWait(string $psid, string $msisdn, string $phone): void
             "✅ تم إرسال رمز التحقق إلى الرقم {$phone}.\n\n🔢 الرجاء إدخال الرمز المكوّن من 6 أرقام:\n\n📱 أو أرسل رقمك مجدداً لاستقبال رمز جديد\n\n❌ لإلغاء العملية أرسل: 0"
         );
     } else {
-        sendMessage($psid, "سيرفر جازي غير متاح حاليا نعمل على اصلاحه 🧑‍🔧 يمكنك التسجيل عبر التطبيق الخاص بنا رابط تحميله https://tasjil-app.lovestoblog.com
-او من
-https://t.me/tasjilbott/130");
+        sendMessage($psid, "سيرفر جازي غير متاح حاليا نعمل على اصلاحه 🧑‍🔧 يمكنك التسجيل عبر التطبيق الخاص بنا رابط تحميله https://dev-tasjilapp.pantheonsite.io/wp-admin/Tasjil-APP-Downlod/update.php");
     }
 }
 function sendNewOTPAndWaitForOffer(string $psid, string $msisdn, string $phone, string $packageCode): void
@@ -1259,9 +1272,7 @@ function sendNewOTPAndWaitForOffer(string $psid, string $msisdn, string $phone, 
             "❌ لإلغاء العملية أرسل: 0"
         );
     } else {
-        sendMessage($psid, "سيرفر جازي غير متاح حاليا نعمل على اصلاحه 🧑‍🔧 يمكنك التسجيل عبر التطبيق الخاص بنا رابط تحميله https://tasjil-app.lovestoblog.com
-او من
-https://t.me/tasjilbott/130");
+        sendMessage($psid, "سيرفر جازي غير متاح حاليا 🧑‍🔧");
     }
 }
 
@@ -1370,6 +1381,7 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
 
     $msisdn        = $user['msisdn'];
     $accessToken   = $user['access_token'];
+    $refreshToken  = $user['refresh_token'];
     $displayMasked = substr($msisdn, 0, 4) . 'xxxx' . substr($msisdn, -2);
     $qrCode        = $cfg['qr_code'];
     $label         = $cfg['gift_label'];
@@ -1378,15 +1390,32 @@ function activateAlgeriaMatchGift(string $psid, array $user): void
 
     $url     = "https://apim.djezzy.dz/mobile-api/api/v1/services/scan/activate-reward/{$msisdn}";
     $payload = json_encode(['qrCode' => $qrCode]);
-    $headers = [
-        'Content-Type: application/json',
-        'Accept: application/json',
-        'Accept-Encoding: gzip',
-        "Authorization: Bearer {$accessToken}",
-        'User-Agent: MobileApp/3.0.0',
-    ];
 
-    $raw = curlWithAllProxies($url, 'POST', $payload, $headers, 'MATCH_GIFT', 12, '/tmp/match_gift.log');
+    $maxTokenRefresh = 3; $tokenRefreshCount = 0;
+    $raw = null;
+    for ($try = 0; $try <= $maxTokenRefresh; $try++) {
+        $headers = [
+            'Content-Type: application/json',
+            'Accept: application/json',
+            'Accept-Encoding: gzip',
+            "Authorization: Bearer {$accessToken}",
+            'User-Agent: MobileApp/3.0.0',
+        ];
+        $raw = curlWithAllProxies($url, 'POST', $payload, $headers, 'MATCH_GIFT', 12, '/tmp/match_gift.log');
+        if ($raw === null) break;
+
+        $json  = $raw['json'];
+        $fault = is_array($json) ? ($json['fault'] ?? null) : null;
+        if (($fault !== null && (int)($fault['code'] ?? 0) === 900901) || $raw['http_code'] === 401) {
+            $refreshed = refreshAccessToken($refreshToken, $msisdn, $psid);
+            if ($refreshed === 'expired') return; // تم إرسال رمز تحقق جديد بالفعل — توقف بصمت
+            if ($refreshed === false) { $raw = null; break; }
+            $accessToken  = $refreshed['access_token'];
+            $refreshToken = $refreshed['refresh_token'];
+            continue;
+        }
+        break; // نتيجة نهائية (نجاح أو فشل غير متعلق بالتوكن)
+    }
 
     if ($raw === null) {
         sendMessage($psid, "❌ حدث خطأ أثناء تفعيل الهدية. يرجى المحاولة مجدداً.\n\n⚡ قناة التلغرام: https://t.me/tasjilbott");
@@ -1549,7 +1578,7 @@ function activateOfferNew(string $psid, array $user, string $packageCode): void
                 if ($tokenRefreshCount >= $maxTokenRefresh) break;
                 $tokenRefreshCount++;
                 $refreshed = refreshAccessTokenNew($refreshToken, $msisdn, $psid, $packageCode);
-                if ($refreshed === 'expired') { clearPending($psid); return; }
+                if ($refreshed === 'expired') { clearPending($psid); return; } // تم إرسال رمز تحقق جديد بالفعل
                 if ($refreshed === false) { clearPending($psid); return; }
                 $accessToken  = $refreshed['access_token'];
                 $refreshToken = $refreshed['refresh_token'];
@@ -1605,9 +1634,14 @@ function activate2G(string $psid, array $user): void
     $displayMasked = substr($msisdn, 0, 4) . 'xxxx' . substr($msisdn, -2);
 
     sendMessage($psid, "🔍 جاري فحص تاريخ آخر تفعيل...");
-    $history = fetchSubscriptionHistory($msisdn, $accessToken);
+    $history = fetchSubscriptionHistory($psid, $user);
+    if ($history === false) return; // انتهت الجلسة نهائيًا — تم إرسال رمز تحقق جديد بالفعل، توقف بصمت
+    $accessToken  = $user['access_token'];  // قد يكون تحدّث لو جُدّد التوكن أثناء الفحص
+    $refreshToken = $user['refresh_token'];
+    dbg("[2G-CHECK] msisdn={$msisdn} history_items=" . (is_array($history) ? count($history) : 'NULL(fetch_failed)'));
     if ($history !== null) {
         $lastTs = getLastWalkWinDate($history);
+        dbg("[2G-CHECK] msisdn={$msisdn} lastWalkWinTs=" . ($lastTs ?? 'NULL(no_match)') . " now=" . time() . ($lastTs ? " elapsed_hours=" . round((time()-$lastTs)/3600,1) : ''));
         if ($lastTs !== null) {
             $elapsed   = time() - $lastTs;
             $sevenDays = 7 * 24 * 3600;
@@ -1664,7 +1698,7 @@ function activate2G(string $psid, array $user): void
             }
             $tokenRefreshCount++;
             $refreshed = refreshAccessToken($refreshToken, $msisdn, $psid);
-            if ($refreshed === 'expired') { clearPending($psid); return; }
+            if ($refreshed === 'expired') { clearPending($psid); return; } // تم إرسال رمز تحقق جديد بالفعل — لا تلمس الجلسة
             if ($refreshed === false) { clearPending($psid); clearSession($psid); return; }
             $accessToken  = $refreshed['access_token'];
             $refreshToken = $refreshed['refresh_token'];
@@ -1715,6 +1749,7 @@ function handleInviteStart(string $psid, array $user): void
 
     sendMessage($psid, "🔍 جاري فحص المكافآت المعلقة...");
     $bonusResult = tryActivateMgmBonus($psid, $msisdn, $accessToken, $user);
+    if ($bonusResult === 'TOKEN_EXPIRED_SILENT') return; // تم إرسال رمز تحقق جديد بالفعل — توقف بصمت
 
     if ($bonusResult === 'SUCCESS_1GO') {
         recordFinalResult($psid);
@@ -1737,7 +1772,8 @@ function handleInviteStart(string $psid, array $user): void
     }
 
     sendMessage($psid, "🔍 جاري الفحص اذا كانت لديك دعوات متاحة ...");
-    $invitations = fetchMgmInvitations($msisdn, $accessToken);
+    $invitations = fetchMgmInvitations($psid, $msisdn, $accessToken, $user['refresh_token']);
+    if ($invitations === false) return; // تم إرسال رمز تحقق جديد بالفعل — توقف بصمت
     if ($invitations === null) {
         sendMessage($psid, "❌ حدث خطأ أثناء جلب بيانات الدعوات، حاول مجدداً.");
         clearSession($psid); sendMessage($psid, ""); return;
@@ -1830,6 +1866,8 @@ function handleInvitePhoneInput(string $psid, string $text, array $session): voi
         case 'CUSTOMER_NOT_EXIST':
         case 'INVALID_NUMBER':
             sendMessage($psid, "❌ الرقم المدرج غير موجود أو غير نشط، تأكد من الرقم وأعد المحاولة.\n❌ لإلغاء العملية أرسل: 1"); break;
+        case 'TOKEN_EXPIRED_SILENT':
+            break; // تم إرسال رمز تحقق جديد بالفعل من داخل refreshAccessToken — لا تلمس الجلسة ولا ترسل شيئاً
         case 'TOKEN_EXPIRED':
             sendMessage($psid, "🔄 انتهت صلاحية الجلسة، الرجاء إعادة إرسال رقمك للتسجيل.");
             clearSession($psid); sendMessage($psid, ""); break;
@@ -1864,10 +1902,14 @@ function handleInviteeOtp(string $psid, string $text, array $session): void
         clearSession($psid); sendMessage($psid, ""); return;
     }
     $inviteeToken = $inviteeResult['access_token'];
+    $inviteeRefreshToken = $inviteeResult['refresh_token'] ?? '';
+    $senderRefreshToken  = $session['refresh_token'] ?? '';
     sendMessage($psid, "🎁 تم التحقق بنجاح! جاري تفعيل المكافآت...");
 
-    $senderBonus  = activateMgmReward($senderMsisdn, $senderToken, 'MGMBONUS1Go');
-    $inviteeBonus = activateMgmReward($inviteeMsisdn, $inviteeToken, 'MGMBONUS500Mo');
+    $senderBonus  = activateMgmReward($psid, $senderMsisdn, $senderToken, $senderRefreshToken, 'MGMBONUS1Go');
+    if ($senderBonus === 'TOKEN_EXPIRED_SILENT') return; // تم إرسال رمز تحقق جديد بالفعل — توقف بصمت
+    $inviteeBonus = activateMgmReward($psid, $inviteeMsisdn, $inviteeToken, $inviteeRefreshToken, 'MGMBONUS500Mo');
+    if ($inviteeBonus === 'TOKEN_EXPIRED_SILENT') return; // تم إرسال رمز تحقق جديد بالفعل — توقف بصمت
 
     $senderMsg = match($senderBonus) {
         'SUCCESS'          => "✅ مكافأتك (1 جيقا) تم تفعيلها بنجاح 🎉",
@@ -1890,14 +1932,29 @@ function handleInviteeOtp(string $psid, string $text, array $session): void
 // ════════════════════════════════════════════════════════════════════════════
 // MGM API Calls
 // ════════════════════════════════════════════════════════════════════════════
-function fetchMgmInvitations(string $msisdn, string $accessToken): ?array
+function fetchMgmInvitations(string $psid, string $msisdn, string $accessToken, string $refreshToken): array|false|null
 {
-    $url     = "https://apim.djezzy.dz/mobile-api/api/v1/services/mgm/invitations/{$msisdn}";
-    $headers = ['Accept: application/json', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0', 'accept-language: ar'];
-    $raw     = curlWithAllProxies($url, 'GET', '', $headers, 'MGM_FETCH', 12);
-    if ($raw === null) return null;
-    $json = $raw['json'];
-    if (is_array($json) && ($json['status'] ?? 0) == 200) return $json['data'] ?? [];
+    $maxTokenRefresh = 3; $tokenRefreshCount = 0;
+    for ($try = 0; $try <= $maxTokenRefresh; $try++) {
+        $url     = "https://apim.djezzy.dz/mobile-api/api/v1/services/mgm/invitations/{$msisdn}";
+        $headers = ['Accept: application/json', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0', 'accept-language: ar'];
+        $raw     = curlWithAllProxies($url, 'GET', '', $headers, 'MGM_FETCH', 12);
+        if ($raw === null) return null;
+        $json = $raw['json'];
+
+        $fault = is_array($json) ? ($json['fault'] ?? null) : null;
+        if (($fault !== null && (int)($fault['code'] ?? 0) === 900901) || ($raw['http_code'] === 401)) {
+            $refreshed = refreshAccessToken($refreshToken, $msisdn, $psid);
+            if ($refreshed === 'expired') return false; // تم إرسال رمز تحقق جديد بالفعل — إشارة للمستدعي بالتوقف بصمت
+            if ($refreshed === false) return null; // خطأ شبكة مؤقت
+            $accessToken  = $refreshed['access_token'];
+            $refreshToken = $refreshed['refresh_token'];
+            continue;
+        }
+
+        if (is_array($json) && ($json['status'] ?? 0) == 200) return $json['data'] ?? [];
+        return null;
+    }
     return null;
 }
 
@@ -1943,7 +2000,7 @@ function sendMgmInvitation(string $senderMsisdn, string $receiverMsisdn, string 
             if ($tokenRefreshCount >= $maxTokenRefresh) return ['status' => 'TOKEN_EXPIRED'];
             $tokenRefreshCount++;
             $refreshed = refreshAccessToken($refreshToken, $senderMsisdn, $psid);
-            if ($refreshed === 'expired') return ['status' => 'TOKEN_EXPIRED'];
+            if ($refreshed === 'expired') return ['status' => 'TOKEN_EXPIRED_SILENT']; // تم إرسال رمز تحقق جديد بالفعل
             if ($refreshed === false) return ['status' => 'TOKEN_EXPIRED'];
             $accessToken = $refreshed['access_token']; $refreshToken = $refreshed['refresh_token'];
             continue;
@@ -1960,19 +2017,33 @@ function sendMgmInvitation(string $senderMsisdn, string $receiverMsisdn, string 
     return ['status' => 'ERROR'];
 }
 
-function activateMgmReward(string $msisdn, string $accessToken, string $packageCode): string
+function activateMgmReward(string $psid, string $msisdn, string $accessToken, string $refreshToken, string $packageCode): string
 {
     $url     = "https://apim.djezzy.dz/mobile-api/api/v1/services/mgm/activate-reward/{$msisdn}";
     $payload = json_encode(['packageCode' => $packageCode]);
-    $headers = ['Content-Type: application/json', 'Accept: application/json', 'Accept-Encoding: gzip', 'accept-language: ar', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0'];
+    $maxTokenRefresh = 3; $tokenRefreshCount = 0;
 
     for ($attempt = 1; $attempt <= 5; $attempt++) {
+        $headers = ['Content-Type: application/json', 'Accept: application/json', 'Accept-Encoding: gzip', 'accept-language: ar', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0'];
         $raw = curlWithAllProxies($url, 'POST', $payload, $headers, "MGM_REWARD:{$packageCode}:#{$attempt}", 15);
         if ($raw === null) { usleep(500000); continue; }
 
         $httpCode = $raw['http_code'];
         $json     = $raw['json'];
         dbg("[MGM_REWARD:{$packageCode}] attempt={$attempt} http={$httpCode}");
+
+        $fault = is_array($json) ? ($json['fault'] ?? null) : null;
+        if (($fault !== null && (int)($fault['code'] ?? 0) === 900901) || $httpCode === 401) {
+            if ($tokenRefreshCount >= $maxTokenRefresh) return 'TOKEN_EXPIRED';
+            $tokenRefreshCount++;
+            $refreshed = refreshAccessToken($refreshToken, $msisdn, $psid);
+            if ($refreshed === 'expired') return 'TOKEN_EXPIRED_SILENT'; // تم إرسال رمز تحقق جديد بالفعل
+            if ($refreshed === false) return 'TOKEN_EXPIRED';
+            $accessToken  = $refreshed['access_token'];
+            $refreshToken = $refreshed['refresh_token'];
+            $attempt--;
+            continue;
+        }
 
         if ($httpCode === 200 || $httpCode === 201) {
             if (is_array($json)) {
@@ -1995,7 +2066,6 @@ function activateMgmReward(string $msisdn, string $accessToken, string $packageC
             $msgEn = is_array($msg) ? ($msg['en'] ?? '') : (string)$msg;
             if (str_contains($msgAr, 'تعذر معالجة طلبك') || str_contains($msgAr, 'لم تمر') || stripos($msgEn, 'cannot be processed') !== false) return 'ALREADY_CLAIMED';
         }
-        if ($httpCode === 401) return 'ERROR';
         usleep(500000);
     }
     return 'ERROR';
@@ -2003,13 +2073,16 @@ function activateMgmReward(string $msisdn, string $accessToken, string $packageC
 
 function tryActivateMgmBonus(string $psid, string $msisdn, string $accessToken, array $user): string
 {
-    $r1 = activateMgmReward($msisdn, $accessToken, 'MGMBONUS1Go');
-    if ($r1 === 'SUCCESS')          return 'SUCCESS_1GO';
-    if ($r1 === 'ALREADY_CLAIMED')  return 'ALREADY_CLAIMED';
+    $refreshToken = $user['refresh_token'];
+    $r1 = activateMgmReward($psid, $msisdn, $accessToken, $refreshToken, 'MGMBONUS1Go');
+    if ($r1 === 'SUCCESS')              return 'SUCCESS_1GO';
+    if ($r1 === 'ALREADY_CLAIMED')      return 'ALREADY_CLAIMED';
+    if ($r1 === 'TOKEN_EXPIRED_SILENT') return 'TOKEN_EXPIRED_SILENT';
     if ($r1 === 'REWARD_NOT_EXIST') {
-        $r2 = activateMgmReward($msisdn, $accessToken, 'MGMBONUS500Mo');
-        if ($r2 === 'SUCCESS')         return 'SUCCESS_500MO';
-        if ($r2 === 'ALREADY_CLAIMED') return 'ALREADY_CLAIMED';
+        $r2 = activateMgmReward($psid, $msisdn, $accessToken, $refreshToken, 'MGMBONUS500Mo');
+        if ($r2 === 'SUCCESS')              return 'SUCCESS_500MO';
+        if ($r2 === 'ALREADY_CLAIMED')      return 'ALREADY_CLAIMED';
+        if ($r2 === 'TOKEN_EXPIRED_SILENT') return 'TOKEN_EXPIRED_SILENT';
         return 'REWARD_NOT_EXIST';
     }
     return 'ERROR';
@@ -2018,14 +2091,36 @@ function tryActivateMgmBonus(string $psid, string $msisdn, string $accessToken, 
 // ════════════════════════════════════════════════════════════════════════════
 // fetchSubscriptionHistory
 // ════════════════════════════════════════════════════════════════════════════
-function fetchSubscriptionHistory(string $msisdn, string $accessToken): ?array
+function fetchSubscriptionHistory(string $psid, array &$user): array|false|null
 {
-    $url     = "https://apim.djezzy.dz/mobile-api/api/v1/subscribers/subscription-history/{$msisdn}";
-    $headers = ['Accept: application/json', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0', 'Connection: Keep-Alive', 'Accept-Language: fr'];
-    $raw     = curlWithAllProxies($url, 'GET', '', $headers, 'SUB_HISTORY', 12);
-    if ($raw === null) return null;
-    $json = $raw['json'];
-    if (is_array($json) && ($json['status'] ?? 0) == 200) return $json['data'] ?? [];
+    $msisdn       = $user['msisdn'];
+    $accessToken  = $user['access_token'];
+    $refreshToken = $user['refresh_token'];
+
+    for ($try = 0; $try < 2; $try++) {
+        $url     = "https://apim.djezzy.dz/mobile-api/api/v1/subscribers/subscription-history/{$msisdn}";
+        $headers = ['Accept: application/json', "Authorization: Bearer {$accessToken}", 'User-Agent: MobileApp/3.0.0', 'Connection: Keep-Alive', 'Accept-Language: fr'];
+        $raw     = curlWithAllProxies($url, 'GET', '', $headers, 'SUB_HISTORY', 12);
+        if ($raw === null) { dbg("[SUB_HISTORY] msisdn={$msisdn} try={$try} curl_failed"); return null; }
+        $json = $raw['json'];
+
+        $fault = is_array($json) ? ($json['fault'] ?? null) : null;
+        if ($fault !== null && (int)($fault['code'] ?? 0) === 900901 && $try === 0) {
+            dbg("[SUB_HISTORY] msisdn={$msisdn} token_expired_refreshing");
+            $refreshed = refreshAccessToken($refreshToken, $msisdn, $psid);
+            if ($refreshed === false) { dbg("[SUB_HISTORY] msisdn={$msisdn} refresh_failed_reauth_started"); return false; } // الجلسة أُعيد ضبطها بالفعل — أوقف فورًا
+            $accessToken  = $refreshed['access_token'];
+            $refreshToken = $refreshed['refresh_token'];
+            $user['access_token']  = $accessToken;
+            $user['refresh_token'] = $refreshToken;
+            saveUser($psid, $user);
+            continue; // أعد المحاولة بتوكن جديد
+        }
+
+        if (is_array($json) && ($json['status'] ?? 0) == 200) return $json['data'] ?? [];
+        dbg("[SUB_HISTORY] msisdn={$msisdn} try={$try} unexpected_status=" . ($json['status'] ?? 'n/a'));
+        return null;
+    }
     return null;
 }
 function getLastWalkWinDate(array $history): ?int
@@ -2037,12 +2132,23 @@ function getLastWalkWinDate(array $history): ?int
             $dt = $item['subscriptionDateTime'] ?? null;
             if ($dt) {
                 $ts = strtotime($dt);
-                if ($ts !== false && ($latest === null || $ts > $latest)) $latest = $ts;
+                if ($ts !== false && ($latest === null || $ts > $latest)) {
+                    $latest = $ts;
+                }
             }
         }
     }
     return $latest;
 }
+// ════════════════════════════════════════════════════════════════════════════
+// ملصقات عشوائية للرد على المرفقات بدون نص
+// ════════════════════════════════════════════════════════════════════════════
+function randomSticker(): string
+{
+    $stickers = ['🙄', '🤔', '😅', '🙃', '😶', '👀', '🫠', '🤨', '😐', '🫡'];
+    return $stickers[array_rand($stickers)];
+}
+
 function formatTimeRemaining(int $secondsLeft): string
 {
     if ($secondsLeft <= 0) return "0 ثانية";
@@ -2056,15 +2162,6 @@ function formatTimeRemaining(int $secondsLeft): string
     if ($minutes > 0) $parts[] = "{$minutes} دقيقة";
     if ($secs > 0 && $days === 0 && $hours === 0) $parts[] = "{$secs} ثانية";
     return implode(' و', $parts);
-}
-
-// ════════════════════════════════════════════════════════════════════════════
-// ملصقات عشوائية للرد على المرفقات بدون نص
-// ════════════════════════════════════════════════════════════════════════════
-function randomSticker(): string
-{
-    $stickers = ['🙎🏻', '🛌🏻', '😝', '🙃', '😶', '👽', '🫠', '🤨', '🫣', '🙋🏻'];
-    return $stickers[array_rand($stickers)];
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2113,7 +2210,7 @@ function refreshAccessTokenNew(string $refreshToken, string $msisdn, string $psi
         if ($result === 'expired') {
             sendMessage($psid, "🔄 انتهت صلاحية الجلسة، سيتم إرسال رمز تحقق جديد...");
             sendNewOTPAndWaitForOffer($psid, $msisdn, '0' . substr($msisdn, 3), $packageCode);
-            return 'expired';
+            return 'expired'; // تم إعلام المستخدم وإرسال رمز جديد بالفعل — على المستدعي التوقف بصمت
         }
         if ($result === 'html' || $result === false) { usleep(300000); continue; }
         return $result;
@@ -2138,9 +2235,12 @@ function refreshTokenRequestNew(string $refreshToken, string $proxyHost, string 
 function sendDjezzyOTP(string $msisdn): bool
 {
     $q = http_build_query(['scope' => 'smsotp', 'client_id' => CLIENT_ID_OLD, 'msisdn' => $msisdn]);
-    foreach (getAllProxies() as $p) {
-        $pp = parseProxy($p);
-        if (djezzyCurl('https://apim.djezzy.dz/oauth2/registration', $q, $pp['host'], $pp['userpass'], 'otp') === true) return true;
+    $proxies = getAllProxies();
+    for ($pass = 0; $pass < 2; $pass++) { // جولتان كاملتان — بعض بروكسيات الموبايل تُسقط الرد رغم نجاح الطلب فعليًا عند جيزي
+        foreach ($proxies as $p) {
+            $pp = parseProxy($p);
+            if (djezzyCurl('https://apim.djezzy.dz/oauth2/registration', $q, $pp['host'], $pp['userpass'], 'otp') === true) return true;
+        }
     }
     return false;
 }
@@ -2172,9 +2272,12 @@ function djezzyTokenReq(string $msisdn, string $otp, string $ph, string $pa): mi
 function sendDjezzyOTPNew(string $msisdn): bool
 {
     $q = http_build_query(['scope' => 'smsotp', 'client_id' => CLIENT_ID_NEW, 'msisdn' => $msisdn]);
-    foreach (getAllProxies() as $p) {
-        $pp = parseProxy($p);
-        if (djezzyCurl('https://apim.djezzy.dz/oauth2/registration', $q, $pp['host'], $pp['userpass'], 'otp_new') === true) return true;
+    $proxies = getAllProxies();
+    for ($pass = 0; $pass < 2; $pass++) {
+        foreach ($proxies as $p) {
+            $pp = parseProxy($p);
+            if (djezzyCurl('https://apim.djezzy.dz/oauth2/registration', $q, $pp['host'], $pp['userpass'], 'otp_new') === true) return true;
+        }
     }
     return false;
 }
@@ -2380,3 +2483,58 @@ function fbApiCall(string $payload): void
     curl_close($ch);
     file_put_contents('/tmp/fb_send.log', date('Y-m-d H:i:s') . " ERR:$err RESP:$resp\n", FILE_APPEND);
 }
+
+
+// ════════════════════════════════════════════════════════════════════════════
+// Webhook Routing — Facebook & Telegram
+// ════════════════════════════════════════════════════════════════════════════
+if (php_sapi_name() === 'cli') { exit("هذا الملف يعمل عبر الويبهوك (nginx/PHP-FPM)، ليس عبر CLI.\n"); }
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET') {
+    if (isset($_GET['hub_mode'], $_GET['hub_verify_token'], $_GET['hub_challenge'])
+        && $_GET['hub_mode'] === 'subscribe'
+        && $_GET['hub_verify_token'] === VERIFY_TOKEN) {
+        http_response_code(200);
+        echo $_GET['hub_challenge'];
+    } else {
+        http_response_code(403);
+        echo 'Forbidden';
+    }
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $rawInput = file_get_contents('php://input');
+    $data     = json_decode($rawInput, true);
+    http_response_code(200);
+    header('Content-Type: text/plain');
+    echo 'EVENT_RECEIVED';
+    if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+
+    if (!$data) exit;
+
+    if (isset($data['update_id'])) {
+        handleTelegramUpdate($data);
+        exit;
+    }
+
+    if (($data['object'] ?? '') !== 'page') exit;
+
+    foreach ($data['entry'] ?? [] as $entry) {
+        foreach ($entry['messaging'] ?? [] as $event) {
+            $psid = $event['sender']['id'] ?? null;
+            if (!$psid) continue;
+            $eid = buildEventId($psid, $event);
+            if (!tryMarkEvent($eid)) { dbg("[DUP] $psid $eid"); continue; }
+            if (!tryLockUser($psid)) { dbg("[LOCK] $psid busy"); unmarkEvent($eid); continue; }
+            try { processEvent($psid, $event); }
+            catch (Throwable $e) { dbg("[ERR] $psid " . $e->getMessage()); }
+            finally { unlockUser($psid); }
+        }
+    }
+    exit;
+}
+
+http_response_code(200);
+echo 'OK';
+exit;
