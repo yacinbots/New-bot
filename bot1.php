@@ -305,63 +305,56 @@ function loadProxies(): array
         if (is_array($d) && count($d) > 0) return $d;
     }
     return [
-    "https://mobile.kookeey.info:1086:2536292-93fe675a98:e852aadc32-DZ-19013548-1m",
-    "https://mobile.kookeey.info:1086:2536292-93fe675a98:e852aadc32-DZ-62938246-1m",
-    "https://mobile.kookeey.info:1086:2536292-93fe675a98:e852aadc32-DZ-69638963-1m",
-    "https://mobile.kookeey.info:1086:2536292-93fe675a98:e852aadc32-DZ-23826947-1m",
-    "https://mobile.kookeey.info:1086:2536292-93fe675a98:e852aadc32-DZ-84593409-1m",
-
-    "https://gate.kookeey.info:1000:2536292-93fe675a98:e852aadc32-DZ-39010862-1m",
-    "https://gate.kookeey.info:1000:2536292-93fe675a98:e852aadc32-DZ-21734216-1m",
-    "https://gate.kookeey.info:1000:2536292-93fe675a98:e852aadc32-DZ-37720417-1m",
-    "https://gate.kookeey.info:1000:2536292-93fe675a98:e852aadc32-DZ-09330143-1m",
-    "https://gate.kookeey.info:1000:2536292-93fe675a98:e852aadc32-DZ-95194004-1m",
-
-    "https://gate.kookeey.info:1000:9104685-f17141e2ef:6765b0f321-DZ-58593243-1m",
-    "https://gate.kookeey.info:1000:9104685-f17141e2ef:6765b0f321-DZ-20824963-1m",
-    "https://gate.kookeey.info:1000:9104685-f17141e2ef:6765b0f321-DZ-70475986-1m",
-    "https://gate.kookeey.info:1000:9104685-f17141e2ef:6765b0f321-DZ-95933969-1m",
-    "https://gate.kookeey.info:1000:9104685-f17141e2ef:6765b0f321-DZ-15359148-1m",
-
-    "https://mobile.kookeey.info:1086:9104685-f17141e2ef:6765b0f321-DZ-34389086-1m",
-    "https://mobile.kookeey.info:1086:9104685-f17141e2ef:6765b0f321-DZ-83297273-1m",
-    "https://mobile.kookeey.info:1086:9104685-f17141e2ef:6765b0f321-DZ-90999314-1m",
-    "https://mobile.kookeey.info:1086:9104685-f17141e2ef:6765b0f321-DZ-35268105-1m",
-    "https://mobile.kookeey.info:1086:9104685-f17141e2ef:6765b0f321-DZ-01575032-1m",
-
-    "https://gate.kookeey.info:1000:6310819-d8e942d8ee:548823d3cd-DZ-47994675-1m",
-    "https://gate.kookeey.info:1000:6310819-d8e942d8ee:548823d3cd-DZ-86396118-1m",
-    "https://gate.kookeey.info:1000:6310819-d8e942d8ee:548823d3cd-DZ-22747459-1m",
-    "https://gate.kookeey.info:1000:6310819-d8e942d8ee:548823d3cd-DZ-41649488-1m",
-    "https://gate.kookeey.info:1000:6310819-d8e942d8ee:548823d3cd-DZ-45048584-1m",
-
-    "https://mobile.kookeey.info:1086:6310819-d8e942d8ee:548823d3cd-DZ-56807146-1m",
-    "https://mobile.kookeey.info:1086:6310819-d8e942d8ee:548823d3cd-DZ-94717595-1m",
-    "https://mobile.kookeey.info:1086:6310819-d8e942d8ee:548823d3cd-DZ-03841039-1m",
-    "https://mobile.kookeey.info:1086:6310819-d8e942d8ee:548823d3cd-DZ-80141495-1m",
-    "https://mobile.kookeey.info:1086:6310819-d8e942d8ee:548823d3cd-DZ-55001594-1m",
-
-    "https://gate.kookeey.info:1000:2099282-acd86a155c:2da9e005ba-DZ-55660303-1m",
-    "https://gate.kookeey.info:1000:2099282-acd86a155c:2da9e005ba-DZ-07923514-1m",
-    "https://gate.kookeey.info:1000:2099282-acd86a155c:2da9e005ba-DZ-40341965-1m",
-    "https://gate.kookeey.info:1000:2099282-acd86a155c:2da9e005ba-DZ-27674493-1m",
-    "https://gate.kookeey.info:1000:2099282-acd86a155c:2da9e005ba-DZ-84052886-1m",
-
-    "https://mobile.kookeey.info:1086:2099282-acd86a155c:2da9e005ba-DZ-24274109-1m",
-    "https://mobile.kookeey.info:1086:2099282-acd86a155c:2da9e005ba-DZ-69291969-1m",
-    "https://mobile.kookeey.info:1086:2099282-acd86a155c:2da9e005ba-DZ-68343852-1m",
-    "https://mobile.kookeey.info:1086:2099282-acd86a155c:2da9e005ba-DZ-85867796-1m",
-    "https://mobile.kookeey.info:1086:2099282-acd86a155c:2da9e005ba-DZ-98541032-1m",
-
-    "https://gate.kookeey.info:1000:1468313-c12d3b88d9:0b38d9c36f-DZ-17522525-1m",
-    "https://gate.kookeey.info:1000:1468313-c12d3b88d9:0b38d9c36f-DZ-20947997-1m",
-    "https://gate.kookeey.info:1000:1468313-c12d3b88d9:0b38d9c36f-DZ-70329364-1m",
-    "https://gate.kookeey.info:1000:1468313-c12d3b88d9:0b38d9c36f-DZ-54713632-1m",
-    "https://gate.kookeey.info:1000:1468313-c12d3b88d9:0b38d9c36f-DZ-44308648-1m",
-
-    "https://mobile.kookeey.info:1086:1468313-c12d3b88d9:0b38d9c36f-DZ-64540136-1m",
-    "https://mobile.kookeey.info:1086:1468313-c12d3b88d9:0b38d9c36f-DZ-14060165-1m",
-    "https://mobile.kookeey.info:1086:1468313-c12d3b88d9:0b38d9c36f-DZ-01978203-1m"
+    "http://gate.kookeey.info:1000:7464034-bc00eb59f5:fc54fe8a0a-DZ-32737453-1m",
+    "http://gate.kookeey.info:1000:7464034-bc00eb59f5:fc54fe8a0a-DZ-56432587-1m",
+    "http://gate.kookeey.info:1000:7464034-bc00eb59f5:fc54fe8a0a-DZ-27039306-1m",
+    "http://gate.kookeey.info:1000:7464034-bc00eb59f5:fc54fe8a0a-DZ-81339712-1m",
+    "http://gate.kookeey.info:1000:7464034-bc00eb59f5:fc54fe8a0a-DZ-15043776-1m",
+    "http://mobile.kookeey.info:1086:7464034-bc00eb59f5:fc54fe8a0a-DZ-83875156-1m",
+    "http://mobile.kookeey.info:1086:7464034-bc00eb59f5:fc54fe8a0a-DZ-55676526-1m",
+    "http://mobile.kookeey.info:1086:7464034-bc00eb59f5:fc54fe8a0a-DZ-28123568-1m",
+    "http://mobile.kookeey.info:1086:7464034-bc00eb59f5:fc54fe8a0a-DZ-23954035-1m",
+    "http://mobile.kookeey.info:1086:7464034-bc00eb59f5:fc54fe8a0a-DZ-68203884-1m",
+    "http://gate.kookeey.info:1000:6569414-55154c240e:199dff35c9-DZ-43435299-1m",
+    "http://gate.kookeey.info:1000:6569414-55154c240e:199dff35c9-DZ-70136297-1m",
+    "http://gate.kookeey.info:1000:6569414-55154c240e:199dff35c9-DZ-09690211-1m",
+    "http://gate.kookeey.info:1000:6569414-55154c240e:199dff35c9-DZ-54922057-1m",
+    "http://gate.kookeey.info:1000:6569414-55154c240e:199dff35c9-DZ-41481427-1m",
+    "http://mobile.kookeey.info:1086:6569414-55154c240e:199dff35c9-DZ-79987015-1m",
+    "http://mobile.kookeey.info:1086:6569414-55154c240e:199dff35c9-DZ-46036262-1m",
+    "http://mobile.kookeey.info:1086:6569414-55154c240e:199dff35c9-DZ-44649406-1m",
+    "http://mobile.kookeey.info:1086:6569414-55154c240e:199dff35c9-DZ-11784209-1m",
+    "http://mobile.kookeey.info:1086:6569414-55154c240e:199dff35c9-DZ-22681983-1m",
+    "http://gate.kookeey.info:1000:1049279-6d55cdb272:b6ce229818-DZ-70127176-1m",
+    "http://gate.kookeey.info:1000:1049279-6d55cdb272:b6ce229818-DZ-28888193-1m",
+    "http://gate.kookeey.info:1000:1049279-6d55cdb272:b6ce229818-DZ-39691366-1m",
+    "http://gate.kookeey.info:1000:1049279-6d55cdb272:b6ce229818-DZ-67583368-1m",
+    "http://gate.kookeey.info:1000:1049279-6d55cdb272:b6ce229818-DZ-82483278-1m",
+    "http://mobile.kookeey.info:1086:1049279-6d55cdb272:b6ce229818-DZ-65551033-1m",
+    "http://mobile.kookeey.info:1086:1049279-6d55cdb272:b6ce229818-DZ-25039549-1m",
+    "http://mobile.kookeey.info:1086:1049279-6d55cdb272:b6ce229818-DZ-26317792-1m",
+    "http://mobile.kookeey.info:1086:1049279-6d55cdb272:b6ce229818-DZ-81851342-1m",
+    "http://mobile.kookeey.info:1086:1049279-6d55cdb272:b6ce229818-DZ-25594447-1m",
+    "http://gate.kookeey.info:1000:1518711-520d25c499:094049a358-DZ-88224532-1m",
+    "http://gate.kookeey.info:1000:1518711-520d25c499:094049a358-DZ-60208739-1m",
+    "http://gate.kookeey.info:1000:1518711-520d25c499:094049a358-DZ-71249293-1m",
+    "http://gate.kookeey.info:1000:1518711-520d25c499:094049a358-DZ-41349815-1m",
+    "http://gate.kookeey.info:1000:1518711-520d25c499:094049a358-DZ-71859234-1m",
+    "http://mobile.kookeey.info:1086:1518711-520d25c499:094049a358-DZ-86736697-1m",
+    "http://mobile.kookeey.info:1086:1518711-520d25c499:094049a358-DZ-30893493-1m",
+    "http://mobile.kookeey.info:1086:1518711-520d25c499:094049a358-DZ-28800972-1m",
+    "http://mobile.kookeey.info:1086:1518711-520d25c499:094049a358-DZ-66006049-1m",
+    "http://mobile.kookeey.info:1086:1518711-520d25c499:094049a358-DZ-04398964-1m",
+    "http://gate.kookeey.info:1000:8179119-2072bee7e4:35067ea761-DZ-81920635-1m",
+    "http://gate.kookeey.info:1000:8179119-2072bee7e4:35067ea761-DZ-61920809-1m",
+    "http://gate.kookeey.info:1000:8179119-2072bee7e4:35067ea761-DZ-44451293-1m",
+    "http://gate.kookeey.info:1000:8179119-2072bee7e4:35067ea761-DZ-48117989-1m",
+    "http://gate.kookeey.info:1000:8179119-2072bee7e4:35067ea761-DZ-60195406-1m",
+    "http://mobile.kookeey.info:1086:8179119-2072bee7e4:35067ea761-DZ-91715029-1m",
+    "http://mobile.kookeey.info:1086:8179119-2072bee7e4:35067ea761-DZ-33683624-1m",
+    "http://mobile.kookeey.info:1086:8179119-2072bee7e4:35067ea761-DZ-89868487-1m",
+    "http://mobile.kookeey.info:1086:8179119-2072bee7e4:35067ea761-DZ-53888793-1m",
+    "http://mobile.kookeey.info:1086:8179119-2072bee7e4:35067ea761-DZ-95280483-1m"
 ];
 }
 function saveProxies(array $proxies): void
@@ -2090,7 +2083,7 @@ function formatTimeRemaining(int $secondsLeft): string
 // ════════════════════════════════════════════════════════════════════════════
 function randomSticker(): string
 {
-    $stickers = ['🙄', '🤔', '😅', '🙃', '😶', '👀', '🫠', '🤨', '😐', '🫡'];
+    $stickers = ['😝', '🤔', '👽', '🙃', '😶', '👀', '🫠', '🤨', '🛌🏻', '🫡'];
     return $stickers[array_rand($stickers)];
 }
 
