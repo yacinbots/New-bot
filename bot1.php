@@ -2087,7 +2087,7 @@ function formatTimeRemaining(int $secondsLeft): string
 // ════════════════════════════════════════════════════════════════════════════
 function randomSticker(): string
 {
-    $stickers = ['😝', '🤔', '👽', '🙃', '😶', '👀', '🫠', '🤨', '🛌🏻', '🫡'];
+    $stickers = ['😅', '😅', '😅', '😅', '😅', '😅', '😅', '😅', '😅', '😅'];
     return $stickers[array_rand($stickers)];
 }
 
