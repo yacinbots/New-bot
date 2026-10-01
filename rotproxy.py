@@ -356,19 +356,24 @@ async def handle(cr, cw):
 
         # --- auth
         user = None
+        tried_u = None
         try:
             scheme, tok = hdr.get("proxy-authorization", "").split(" ", 1)
             u, pw = base64.b64decode(tok).decode().split(":", 1)
+            tried_u = u
             acc = ACCOUNTS.get(u)
             if scheme.lower() == "basic" and acc and hmac.compare_digest(acc["pw"], pw):
                 user = u
         except Exception:
             pass
+        peer = cw.get_extra_info("peername")
         if not user:
+            print(f"[auth] FAIL from {peer} {method} {target} user={tried_u!r} has_header={'proxy-authorization' in hdr}")
             deny(cw, 407, "Proxy Authentication Required", 'Proxy-Authenticate: Basic realm="proxy"\r\n')
             await cw.drain()
             return
 
+        print(f"[req] {peer} {user} {method} {target}")
         for _ in range(60):          # wait up to 30s for first proxies at cold start
             if POOL:
                 break
